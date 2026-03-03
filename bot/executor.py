@@ -159,8 +159,12 @@ async def execute_trade(
                 entry_price = round(round(entry_price / tick) * tick, 4)
 
             # Integer shares: guarantees maker_amount (shares*price) ≤ 2 decimals.
+            min_trade = get("min_trade_usd", 1.0)
             shares = max(1, math.floor(size_usd / entry_price))
             size_usd = round(shares * entry_price, 2)
+            if size_usd < min_trade:
+                shares = math.ceil(min_trade / entry_price)
+                size_usd = round(shares * entry_price, 2)
 
             # Create signed order
             signed_order = client.create_order(
