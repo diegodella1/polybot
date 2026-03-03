@@ -25,8 +25,8 @@ class TestKellySize:
         assert result["size_usd"] > 0
 
     def test_trades_at_any_entry_price(self):
-        # Unlike Kelly, should trade at 55c, 60c, etc.
-        for price in [0.40, 0.50, 0.55, 0.60, 0.70]:
+        # Should trade within configured price range [0.35, 0.65]
+        for price in [0.40, 0.50, 0.55, 0.60]:
             result = kelly_size(0.25, price, 50.0)
             assert result["size_usd"] > 0, f"Should trade at entry_price={price}"
 

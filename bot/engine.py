@@ -124,22 +124,30 @@ class TradingEngine:
             condition_id = trade["condition_id"]
             side = trade["side"]
 
-            # Try to get actual resolution from Gamma API
+            # Try to get actual resolution from CLOB API
             won = None
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.get(
-                        f"https://gamma-api.polymarket.com/markets/{condition_id}"
+                        f"https://clob.polymarket.com/markets/{condition_id}"
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                    resolution = (data.get("resolution") or "").lower()
-                    if resolution:
-                        if side == "up":
-                            won = resolution in ("yes", "up", "1")
-                        else:
-                            won = resolution in ("no", "down", "0")
+                    if data.get("closed"):
+                        token_id_str = trade["token_id"]
+                        for tok in data.get("tokens", []):
+                            if tok.get("token_id") == token_id_str:
+                                won = tok.get("winner", False)
+                                break
+                        if won is None:
+                            # Fallback: match by outcome name
+                            for tok in data.get("tokens", []):
+                                outcome = (tok.get("outcome") or "").lower()
+                                if (side == "up" and outcome in ("up", "yes")) or \
+                                   (side == "down" and outcome in ("down", "no")):
+                                    won = tok.get("winner", False)
+                                    break
             except Exception as e:
                 logger.warning("Could not check resolution for trade %d: %s", trade_id, e)
 
@@ -749,34 +757,59 @@ class TradingEngine:
             else:
                 return not btc_went_up
 
-        # Real resolution: query Gamma API with retry
+        # Real resolution: query CLOB API with retry
         import httpx
-        for attempt in range(5):
+        token_id = market.token_up_id if side == "up" else market.token_down_id
+        for attempt in range(10):
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.get(
-                        f"https://gamma-api.polymarket.com/markets/{market.condition_id}"
+                        f"https://clob.polymarket.com/markets/{market.condition_id}"
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                    resolution = (data.get("resolution") or "").lower()
-                    if resolution:
-                        if side == "up":
-                            return resolution in ("yes", "up", "1")
-                        else:
-                            return resolution in ("no", "down", "0")
-                    # Resolution not yet available, wait and retry
-                    logger.info("Resolution not yet available (attempt %d/5), waiting 10s...", attempt + 1)
-                    await asyncio.sleep(10)
+                    if data.get("closed"):
+                        # Find our token in the response
+                        for tok in data.get("tokens", []):
+                            if tok.get("token_id") == token_id:
+                                won = tok.get("winner", False)
+                                logger.info("Resolution via CLOB: %s (token matched)", "WIN" if won else "LOSS")
+                                return won
+                        # Fallback: match by outcome name
+                        for tok in data.get("tokens", []):
+                            outcome = (tok.get("outcome") or "").lower()
+                            if (side == "up" and outcome in ("up", "yes")) or \
+                               (side == "down" and outcome in ("down", "no")):
+                                won = tok.get("winner", False)
+                                logger.info("Resolution via CLOB: %s (outcome matched)", "WIN" if won else "LOSS")
+                                return won
+                        logger.warning("Market closed but couldn't match token/outcome")
+                    else:
+                        logger.info("Market not yet closed (attempt %d/10), waiting 15s...", attempt + 1)
+                    await asyncio.sleep(15)
             except Exception as e:
                 logger.warning("Resolution check attempt %d failed: %s", attempt + 1, e)
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
 
-        # All retries exhausted — fallback to price movement
-        logger.warning("Resolution not available after 5 retries, using price fallback")
+        # All retries exhausted — fallback to on-chain token balance
+        logger.warning("Resolution not available after 10 retries, checking on-chain")
+        try:
+            from bot.wallet import get_token_balance
+            balance = get_token_balance(token_id)
+            if balance > 0:
+                logger.info("On-chain fallback: tokens found (%.4f), marking WIN", balance)
+                return True
+            else:
+                logger.info("On-chain fallback: no tokens, marking LOSS")
+                return False
+        except Exception as e:
+            logger.warning("On-chain fallback failed: %s", e)
+
+        # Last resort: price movement
+        logger.warning("All resolution methods failed, using price fallback")
         ret = self.price_buffer.ret(5)
         if ret is None:
-            return False  # Conservative: assume loss
+            return False
         btc_went_up = ret > 0
         return (side == "up") == btc_went_up
 

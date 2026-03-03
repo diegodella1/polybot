@@ -159,8 +159,7 @@ async def execute_trade(
                 entry_price = round(round(entry_price / tick) * tick, 4)
 
             # Integer shares: guarantees maker_amount (shares*price) ≤ 2 decimals.
-            # GTC requires minimum 5 shares.
-            shares = max(5, math.floor(size_usd / entry_price))
+            shares = max(1, math.floor(size_usd / entry_price))
             size_usd = round(shares * entry_price, 2)
 
             # Create signed order
@@ -217,6 +216,19 @@ async def execute_trade(
                     except Exception:
                         pass
                     return TradeResult(success=False, error="GTC order timed out (15s) — cancelled")
+
+                # Update balance/allowance for CONDITIONAL tokens so we can SELL later
+                try:
+                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                    client.update_balance_allowance(
+                        BalanceAllowanceParams(
+                            asset_type=AssetType.CONDITIONAL,
+                            token_id=token_id,
+                        )
+                    )
+                    logger.info("Updated CONDITIONAL allowance for token %s", token_id[:16])
+                except Exception as e:
+                    logger.warning("Failed to update CONDITIONAL allowance: %s", e)
 
         except Exception as e:
             logger.error("Order execution failed: %s", e)
@@ -292,7 +304,7 @@ async def exit_position(
             tick = float(tick_size)
             exit_price = round(round(exit_price / tick) * tick, 4)
 
-        int_shares = max(5, math.floor(shares))
+        int_shares = max(1, math.floor(shares))
 
         signed_order = client.create_order(
             order_args=OrderArgs(
