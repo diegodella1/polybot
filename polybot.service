@@ -1,0 +1,15 @@
+[Unit]
+Description=Polybot Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=diego
+WorkingDirectory=/home/diego/Documents/polybot
+ExecStart=/home/diego/Documents/polybot/venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

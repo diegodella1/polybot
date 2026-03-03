@@ -1,0 +1,29 @@
+max_trade_pct: 0.12
+min_trade_usd: 1
+max_exposure_usd: 15
+daily_loss_limit_pct: 0.35
+trade_threshold: 0.06
+max_spread_cents: 8
+min_time_remaining_sec: 15
+max_consecutive_losses: 3
+cooldown_rounds: 6
+kelly_fraction: 0.5
+dry_run: false
+weights:
+  momentum: 0.3
+  book_skew: 0.2
+  fair_value: 0.2
+  vol_regime: 0.15
+  rag_pattern: 0.1
+  sentiment: 0.05
+stop_loss_pct: 0.3
+take_profit_pct: 0.3
+daily_profit_target_pct: 0.2
+min_win_rate: 0.45
+circuit_breaker_window: 40
+circuit_breaker_hours: 2
+max_estimated_winrate: 0.62
+min_estimated_winrate: 0.52
+binance_symbol: btcusdt
+telegram_enabled: true
+bot_enabled: true

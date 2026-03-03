@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polybot &mdash; Login</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+    <div class="login-wrap">
+        <div class="login-card">
+            <h2>POLYBOT</h2>
+            <div class="login-subtitle">Trading Terminal Access</div>
+
+            <div class="login-error" id="error">Wrong password</div>
+
+            <form id="loginForm">
+                <div class="form-field">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" autofocus autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn-login" id="loginBtn">
+                    <span class="btn-text">LOGIN</span>
+                    <div class="spinner"></div>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('loginForm');
+        const btn = document.getElementById('loginBtn');
+        const errorEl = document.getElementById('error');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errorEl.style.display = 'none';
+            btn.classList.add('loading');
+
+            const pw = document.getElementById('password').value;
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pw }),
+                });
+
+                if (res.ok) {
+                    const next = new URLSearchParams(location.search).get('next') || '/admin';
+                    location.href = next;
+                } else {
+                    btn.classList.remove('loading');
+                    errorEl.style.display = 'block';
+                    document.getElementById('password').value = '';
+                    document.getElementById('password').focus();
+                }
+            } catch (err) {
+                btn.classList.remove('loading');
+                errorEl.textContent = 'Connection error';
+                errorEl.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
