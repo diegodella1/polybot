@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWS();
     fetchBtcPrice();
     setInterval(fetchStatus, 10000);
+    setInterval(fetchTrades, 15000);  // Refresh trades periodically (catches resolved PENDINGs)
     setInterval(fetchBtcPrice, 15000);
 });
 
