@@ -63,7 +63,7 @@ class TestRiskCheck:
         from bot.risk import check_risk
         mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
             "enabled": True,
-            "daily_pnl": -20.0,  # 20% loss on $100 bankroll
+            "daily_pnl": -50.0,  # 50% loss on $100 bankroll (exceeds 45% limit)
             "consecutive_losses": 0,
             "cooldown_remaining": 0,
             "current_exposure": 0.0,

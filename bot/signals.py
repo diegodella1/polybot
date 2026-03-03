@@ -34,7 +34,7 @@ def momentum_signal(buf: PriceBuffer) -> float | None:
         return None
 
     raw = 0.5 * ret_1m + 0.3 * ret_5m + 0.2 * (ema_fast - ema_slow) / price
-    return _normalize(raw, scale=500)
+    return _normalize(raw, scale=150)
 
 
 def book_skew_signal(poly_ws: PolymarketWS) -> float | None:
@@ -69,29 +69,23 @@ def volatility_multiplier(buf: PriceBuffer) -> tuple[float, float]:
 def fair_value_signal(
     buf: PriceBuffer, poly_ws: PolymarketWS, mom: float
 ) -> float | None:
-    """Gap between estimated fair value and market price.
+    """Detect mispricing: BTC momentum implies a probability that Polymarket hasn't priced in.
 
-    Uses midpoint (not just ask) for symmetric comparison.
-    Fair value estimation accounts for current market price, not anchored at 0.5.
+    If BTC is surging but the Up token mid hasn't moved, there's edge.
     """
     ob = poly_ws.orderbook
     mid = ob.midpoint
     if mid is None:
         return None
 
-    # Estimate fair value: current midpoint + momentum adjustment
-    # Small correction: if BTC momentum is positive, Up token should be slightly higher
-    fair_value = mid + mom * 0.05
-    gap = fair_value - mid
+    # BTC momentum → implied probability for the Up token
+    # mom ∈ [-1, 1] → btc_implied_prob ∈ [0, 1]
+    btc_implied_prob = 0.5 + mom * 0.5
 
-    # Only meaningful if gap is significant relative to spread
-    spread = ob.spread
-    if spread is not None and spread > 0:
-        # Gap must be at least half the spread to matter
-        if abs(gap) < spread * 0.5:
-            return 0.0
+    # Gap: what BTC says vs what Polymarket prices
+    gap = btc_implied_prob - mid
 
-    return _clamp(gap * 10)
+    return _normalize(gap, scale=10)
 
 
 def compute_signal(

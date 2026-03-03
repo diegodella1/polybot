@@ -237,11 +237,12 @@ def create_router(engine, ws_manager) -> APIRouter:
         import asyncio
         from bot.wallet import (
             get_eoa_usdc_balance, get_eoa_matic_balance,
-            get_exchange_usdc_balance, scan_redeemable_tokens,
+            get_exchange_usdc_balance, get_usdt_balance, scan_redeemable_tokens,
         )
 
         result = {
             "eoa_usdc": None,
+            "eoa_usdt": None,
             "exchange_usdc": None,
             "matic": None,
             "unredeemed_count": 0,
@@ -249,12 +250,14 @@ def create_router(engine, ws_manager) -> APIRouter:
         }
 
         try:
-            eoa_usdc, exchange_usdc, matic = await asyncio.gather(
+            eoa_usdc, eoa_usdt, exchange_usdc, matic = await asyncio.gather(
                 asyncio.to_thread(get_eoa_usdc_balance),
+                asyncio.to_thread(get_usdt_balance),
                 asyncio.to_thread(get_exchange_usdc_balance),
                 asyncio.to_thread(get_eoa_matic_balance),
             )
             result["eoa_usdc"] = round(eoa_usdc, 4)
+            result["eoa_usdt"] = round(eoa_usdt, 4)
             result["exchange_usdc"] = round(exchange_usdc, 4)
             result["matic"] = round(matic, 4)
         except Exception as e:
@@ -329,6 +332,25 @@ def create_router(engine, ws_manager) -> APIRouter:
             "tx_hash": result.tx_hash,
             "amount": float(amount),
             "to": address,
+        }
+
+    @router.post("/wallet/swap-usdt")
+    async def wallet_swap_usdt(request: Request):
+        """Swap USDT → USDC.e via Uniswap V3. Optionally specify amount."""
+        _require_admin(request)
+        from bot.wallet import swap_usdt_to_usdce
+
+        body = await request.json()
+        amount = body.get("amount")  # None = swap all
+
+        result = await swap_usdt_to_usdce(float(amount) if amount else None)
+        if not result.success:
+            raise HTTPException(500, result.error)
+
+        return {
+            "status": "ok",
+            "tx_hash": result.tx_hash,
+            "details": result.details,
         }
 
     return router

@@ -5,7 +5,8 @@ const API = '';
 const FIELDS = [
     'max_trade_pct', 'min_trade_usd', 'max_exposure_usd', 'daily_loss_limit_pct',
     'trade_threshold', 'max_spread_cents', 'min_time_remaining_sec',
-    'max_consecutive_losses', 'cooldown_rounds', 'kelly_fraction', 'dry_run'
+    'max_consecutive_losses', 'cooldown_rounds', 'kelly_fraction',
+    'min_entry_price', 'max_entry_price', 'dry_run'
 ];
 
 const WEIGHTS = ['momentum', 'book_skew', 'fair_value', 'vol_regime', 'rag_pattern', 'sentiment'];
@@ -367,6 +368,12 @@ async function loadWalletBalances() {
             unEl.style.color = '';
         }
 
+        const usdtEl = document.getElementById('walletUsdt');
+        if (usdtEl) {
+            usdtEl.textContent = fmt(d.eoa_usdt);
+            if (d.eoa_usdt > 0) usdtEl.style.color = 'var(--yellow)';
+        }
+
         const maticEl = document.getElementById('walletMatic');
         if (d.matic != null) {
             maticEl.textContent = `Gas: ${d.matic.toFixed(4)} POL`;
@@ -438,6 +445,43 @@ async function sendUsdc() {
         }
     } catch (e) {
         showToast('Send failed: network error', 'error');
+    }
+}
+
+async function swapUsdt() {
+    const usdtEl = document.getElementById('walletUsdt');
+    const usdtText = usdtEl ? usdtEl.textContent : '';
+    const usdtVal = parseFloat(usdtText.replace('$', '')) || 0;
+
+    if (usdtVal < 0.01) {
+        showToast('No USDT balance to swap', 'error');
+        return;
+    }
+
+    if (!confirm(`Swap $${usdtVal.toFixed(2)} USDT to USDC.e via Uniswap V3?`)) return;
+
+    showToast('Swapping USDT \u2192 USDC.e...', 'info');
+
+    try {
+        const res = await authFetch(`${API}/api/wallet/swap-usdt`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        if (res.ok) {
+            const d = await res.json();
+            const newBal = d.details?.usdc_balance;
+            const msg = newBal != null
+                ? `Swapped! New USDC.e: $${newBal.toFixed(2)} \u2014 tx: ${d.tx_hash.slice(0, 12)}...`
+                : `Swap OK \u2014 tx: ${d.tx_hash.slice(0, 12)}...`;
+            showToast(msg, 'success');
+            loadWalletBalances();
+        } else {
+            const err = await res.json();
+            showToast(`Swap failed: ${err.detail}`, 'error');
+        }
+    } catch (e) {
+        showToast('Swap failed: network error', 'error');
     }
 }
 

@@ -30,6 +30,24 @@ class OrderbookSnapshot:
         return self.asks[0][0] if self.asks else None
 
     @property
+    def is_stale(self) -> bool:
+        """Orderbook older than 30 seconds is stale."""
+        try:
+            ts = float(self.timestamp)
+        except (TypeError, ValueError):
+            return True
+        if ts <= 0:
+            return True
+        return (time.time() - ts) > 30
+
+    @property
+    def is_valid(self) -> bool:
+        """Check basic orderbook integrity: best_bid must be < best_ask."""
+        if self.best_bid is None or self.best_ask is None:
+            return True  # Can't validate with one side
+        return self.best_bid < self.best_ask
+
+    @property
     def spread(self) -> float | None:
         if self.best_bid is not None and self.best_ask is not None:
             return self.best_ask - self.best_bid
@@ -158,10 +176,14 @@ class PolymarketWS:
             asks = self._parse_levels(data.get("asks") or [])
             bids.sort(key=lambda x: -x[0])
             asks.sort(key=lambda x: x[0])
+            try:
+                ts = float(data.get("timestamp", 0))
+            except (TypeError, ValueError):
+                ts = time.time()
             self.orderbook = OrderbookSnapshot(
                 bids=bids,
                 asks=asks,
-                timestamp=data.get("timestamp", 0),
+                timestamp=ts,
             )
 
         elif event_type in ("book_delta", "delta"):

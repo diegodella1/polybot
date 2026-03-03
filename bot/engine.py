@@ -43,6 +43,18 @@ class TradingEngine:
         self.sentiment_signal = 0.0
         self.pattern_store = None  # Set by main.py
 
+        # Current market time remaining (used by _build_features for RAG)
+        self._market_seconds_remaining = 150.0  # Default: midpoint of 5min
+
+        # Cache last round's signals for consistent dashboard display
+        self._last_signals = None
+
+        # Wallet balance cache (updated by _sync_balance)
+        self._cached_wallet_balance = None
+
+        # Retry queue for failed auto-redeems
+        self._pending_redeems: list[dict] = []
+
     async def _on_kline(self, kline):
         self.price_buffer.update(kline)
 
@@ -94,7 +106,7 @@ class TradingEngine:
         db = await get_db()
         try:
             cursor = await db.execute(
-                """SELECT id, condition_id, side, size_usd
+                """SELECT id, condition_id, side, size_usd, token_id
                    FROM trades WHERE outcome IS NULL
                    ORDER BY id ASC"""
             )
@@ -132,9 +144,24 @@ class TradingEngine:
                 logger.warning("Could not check resolution for trade %d: %s", trade_id, e)
 
             if won is None:
-                # Market not yet resolved or API failed — mark as loss (conservative)
-                logger.warning("Trade %d: no resolution found, marking as loss (conservative)", trade_id)
-                won = False
+                # Gamma API failed — check token balance on-chain as fallback
+                try:
+                    from bot.wallet import get_token_balance
+                    token_id_str = trade["token_id"]
+                    if token_id_str:
+                        balance = get_token_balance(token_id_str)
+                        if balance > 0:
+                            won = True
+                            logger.info("Trade %d: on-chain tokens found (%.4f), marking as WIN", trade_id, balance)
+                        else:
+                            won = False
+                            logger.info("Trade %d: no on-chain tokens, marking as LOSS (conservative)", trade_id)
+                    else:
+                        won = False
+                        logger.warning("Trade %d: no token_id stored, marking as LOSS (conservative)", trade_id)
+                except Exception as e:
+                    logger.warning("Trade %d: on-chain check failed (%s), marking as LOSS", trade_id, e)
+                    won = False
 
             new_bankroll = await resolve_trade(trade_id, won, bankroll)
             pnl = new_bankroll - bankroll
@@ -152,9 +179,20 @@ class TradingEngine:
                     if r.success:
                         logger.info("Auto-redeemed recovered trade %d: tx=%s", trade_id, r.tx_hash)
                     else:
-                        logger.warning("Auto-redeem failed for trade %d: %s", trade_id, r.error)
+                        logger.warning("Auto-redeem failed for trade %d: %s — queued for retry", trade_id, r.error)
+                        self._pending_redeems.append({
+                            "condition_id": condition_id,
+                            "index_set": index_set,
+                            "retries": 0,
+                        })
                 except Exception as e:
-                    logger.warning("Auto-redeem error for trade %d: %s", trade_id, e)
+                    logger.warning("Auto-redeem error for trade %d: %s — queued for retry", trade_id, e)
+                    index_set = 1 if side == "up" else 2
+                    self._pending_redeems.append({
+                        "condition_id": condition_id,
+                        "index_set": index_set,
+                        "retries": 0,
+                    })
 
         # Clear position state after recovery
         await state.set("has_open_position", False)
@@ -176,14 +214,18 @@ class TradingEngine:
                 if self._round % 10 == 0:
                     await self._sync_balance()
 
+                # Retry failed redeems every 5 rounds
+                if self._round % 5 == 0 and self._pending_redeems:
+                    await self._process_pending_redeems()
+
                 self._round += 1
                 await self._run_round()
 
             except Exception as e:
                 logger.error("Round error: %s", e, exc_info=True)
 
-            # Poll every 15 seconds for new markets
-            await asyncio.sleep(15)
+            # Poll every 10 seconds for new markets
+            await asyncio.sleep(10)
 
     async def _broadcast_round(self, decision: str, reason: str,
                                signal: float | None = None,
@@ -248,6 +290,9 @@ class TradingEngine:
         # Decrement cooldown only when a market is available (meaningful round)
         await decrement_cooldown()
 
+        # Update time remaining for RAG feature vector
+        self._market_seconds_remaining = market.seconds_remaining
+
         min_time = get("min_time_remaining_sec", 90)
         if market.seconds_remaining < min_time:
             logger.debug(
@@ -288,6 +333,8 @@ class TradingEngine:
             rag_signal=self.rag_signal,
             sentiment_signal=self.sentiment_signal,
         )
+
+        self._last_signals = signals
 
         if self.on_signal:
             await self.on_signal(signals)
@@ -346,25 +393,43 @@ class TradingEngine:
             )
             return
 
+        if ob.is_stale:
+            logger.warning("Round %d: orderbook stale (>30s), skipping", self._round)
+            await self._broadcast_round(
+                "skip", "Orderbook desactualizado (>30s)",
+                signal=composite, market_name=market_name,
+            )
+            return
+
+        if not ob.is_valid:
+            logger.warning("Round %d: orderbook corrupt (bid >= ask), skipping", self._round)
+            await self._broadcast_round(
+                "skip", "Orderbook corrupto (bid >= ask)",
+                signal=composite, market_name=market_name,
+            )
+            return
+
         # Determine side and entry price
         if composite > 0:
             side = "up"
             token_id = market.token_up_id
             entry_price = ob.best_ask or 0.50
+            trade_spread = ob.spread  # Spread from UP token orderbook
         else:
             side = "down"
             token_id = market.token_down_id
             # Subscribe to Down token orderbook for accurate pricing
             await self.polymarket_ws.subscribe(market.token_down_id)
             await asyncio.sleep(2)
-            ob = self.polymarket_ws.orderbook
+            ob_down = self.polymarket_ws.orderbook
             # REST fallback if WS orderbook is empty for Down token
-            if not ob.bids and not ob.asks:
+            if not ob_down.bids and not ob_down.asks:
                 await self.polymarket_ws.fetch_orderbook_rest(market.token_down_id)
-                ob = self.polymarket_ws.orderbook
+                ob_down = self.polymarket_ws.orderbook
+            trade_spread = ob_down.spread  # Spread from DOWN token orderbook
             # Use Down ask if available and sane, otherwise fallback
-            if ob.best_ask is not None and 0.05 < ob.best_ask < 0.95:
-                entry_price = ob.best_ask
+            if ob_down.best_ask is not None and 0.05 < ob_down.best_ask < 0.95:
+                entry_price = ob_down.best_ask
             else:
                 # Try complement of Up best_bid
                 await self.polymarket_ws.subscribe(market.token_up_id)
@@ -375,6 +440,37 @@ class TradingEngine:
                     entry_price = 1.0 - up_bid
                 else:
                     entry_price = 0.50
+
+        # Entry price filter: only trade near-50/50 markets
+        min_ep = get("min_entry_price", 0.25)
+        max_ep = get("max_entry_price", 0.75)
+        if entry_price < min_ep or entry_price > max_ep:
+            logger.info(
+                "Round %d: entry price %.2f outside [%.2f, %.2f], skipping",
+                self._round, entry_price, min_ep, max_ep,
+            )
+            await self._broadcast_round(
+                "skip",
+                f"Precio de entrada {entry_price:.2f} fuera de rango seguro [{min_ep}, {max_ep}]",
+                signal=composite,
+                market_name=market_name,
+            )
+            return
+
+        # Validate spread BEFORE sizing — prevents SL triggers from wide spreads
+        max_spread = get("max_spread_cents", 5) / 100.0
+        if trade_spread is not None and trade_spread > max_spread:
+            logger.info(
+                "Round %d: spread %.4f > max %.4f on %s token, skipping",
+                self._round, trade_spread, max_spread, side.upper(),
+            )
+            await self._broadcast_round(
+                "skip",
+                f"Spread muy amplio ({trade_spread*100:.1f}¢ > {max_spread*100:.0f}¢) en token {side.upper()}",
+                signal=composite,
+                market_name=market_name,
+            )
+            return
 
         sizing = kelly_size(abs(composite), entry_price, bankroll)
         if sizing["size_usd"] <= 0:
@@ -393,7 +489,6 @@ class TradingEngine:
             return
 
         # 5. EXECUTE
-        spread = ob.spread
         result = await execute_trade(
             condition_id=market.condition_id,
             token_id=token_id,
@@ -403,7 +498,7 @@ class TradingEngine:
             shares=sizing["shares"],
             entry_price=entry_price,
             signal_details=signals,
-            spread=spread,
+            spread=trade_spread,
             btc_price=self.price_buffer.current_price,
         )
 
@@ -439,12 +534,13 @@ class TradingEngine:
             MAX_RESOLUTION_WAIT,
         )
 
-        stop_loss_pct = get("stop_loss_pct", 0.30)
-        take_profit_pct = get("take_profit_pct", 0.30)
+        stop_loss_pct = get("stop_loss_pct", 0.08)
+        take_profit_pct = get("take_profit_pct", 0.12)
         stop_price = result.filled_price * (1 - stop_loss_pct)
         take_profit_price = result.filled_price * (1 + take_profit_pct)
         early_exit = None  # "stop_loss" or "take_profit"
         exit_proceeds = None
+        exit_failed = False  # Don't retry after failure
 
         logger.info(
             "Monitoring %.0fs | entry=%.2f¢ stop=%.2f¢ (-%d%%) tp=%.2f¢ (+%d%%)",
@@ -464,6 +560,25 @@ class TradingEngine:
             elapsed += 1
 
             bid = self.polymarket_ws.orderbook.best_bid
+
+            # Broadcast live P&L to dashboard
+            if bid is not None and self.on_trade:
+                unrealized_pnl = (bid - result.filled_price) * result.shares
+                unrealized_pct = ((bid / result.filled_price) - 1) * 100 if result.filled_price > 0 else 0
+                await self.on_trade({
+                    "event_type": "position_update",
+                    "trade_id": result.trade_id,
+                    "current_bid": bid,
+                    "entry_price": result.filled_price,
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "unrealized_pct": round(unrealized_pct, 1),
+                    "elapsed": elapsed,
+                    "wait_seconds": wait_seconds,
+                })
+
+            if exit_failed:
+                continue  # Skip SL/TP checks, wait for natural resolution
+
             if bid is not None:
                 logger.debug(
                     "Monitor: bid=%.2f¢ stop=%.2f¢ tp=%.2f¢",
@@ -479,6 +594,9 @@ class TradingEngine:
                         early_exit = "stop_loss"
                         exit_proceeds = exit_result["proceeds"]
                         break
+                    else:
+                        logger.warning("SL exit failed, holding to resolution")
+                        exit_failed = True
                 elif bid >= take_profit_price:
                     logger.info(
                         "TAKE-PROFIT triggered: bid=%.2f¢ >= tp=%.2f¢",
@@ -489,6 +607,9 @@ class TradingEngine:
                         early_exit = "take_profit"
                         exit_proceeds = exit_result["proceeds"]
                         break
+                    else:
+                        logger.warning("TP exit failed, holding to resolution")
+                        exit_failed = True
 
         if early_exit:
             new_bankroll = await resolve_trade(
@@ -524,29 +645,40 @@ class TradingEngine:
 
         # Auto-redeem winning tokens on-chain
         if outcome_label == "win" and not get("dry_run", True):
+            index_set = 1 if side == "up" else 2
             try:
                 from bot.wallet import redeem_positions
-                index_set = 1 if side == "up" else 2
                 r = await redeem_positions(market.condition_id, [index_set])
                 if r.success:
                     logger.info("Auto-redeemed: tx=%s", r.tx_hash)
                 else:
-                    logger.warning("Auto-redeem failed: %s", r.error)
+                    logger.warning("Auto-redeem failed: %s — queued for retry", r.error)
+                    self._pending_redeems.append({
+                        "condition_id": market.condition_id,
+                        "index_set": index_set,
+                        "retries": 0,
+                    })
             except Exception as e:
-                logger.warning("Auto-redeem error: %s", e)
+                logger.warning("Auto-redeem error: %s — queued for retry", e)
+                self._pending_redeems.append({
+                    "condition_id": market.condition_id,
+                    "index_set": index_set,
+                    "retries": 0,
+                })
 
         # Update risk state
         won_for_stats = outcome_label in ("win", "take_profit")
         await record_outcome(won_for_stats, pnl, new_bankroll)
         await update_daily_stats(pnl, won_for_stats, new_bankroll)
 
-        # Store RAG pattern for future k-NN queries
+        # Store RAG pattern for future k-NN queries (outcome, not side)
         if self.pattern_store is not None:
             try:
-                features = self._build_features(composite)
+                features = self._build_features()
                 if features is not None:
-                    await self.pattern_store.store(result.trade_id, features, side)
-                    logger.info("Stored RAG pattern for trade %d (%s)", result.trade_id, side)
+                    rag_outcome = "win" if won_for_stats else "loss"
+                    await self.pattern_store.store(result.trade_id, features, rag_outcome)
+                    logger.info("Stored RAG pattern for trade %d (%s)", result.trade_id, rag_outcome)
             except Exception as e:
                 logger.warning("Failed to store RAG pattern: %s", e)
 
@@ -568,8 +700,11 @@ class TradingEngine:
             new_bankroll,
         )
 
-    def _build_features(self, signal_score: float = 0.0) -> np.ndarray | None:
-        """Build 8-float feature vector from current price buffer state."""
+    def _build_features(self) -> np.ndarray | None:
+        """Build 8-float feature vector from current price buffer state.
+
+        Feature 8 is time_in_candle (normalized 0-1: how much time remains in market).
+        """
         snap = self.price_buffer.snapshot()
         if snap is None:
             return None
@@ -580,6 +715,8 @@ class TradingEngine:
         def safe(v):
             return v if v is not None else 0.0
 
+        time_in_candle = max(0.0, min(1.0, self._market_seconds_remaining / 300.0))
+
         features = [
             safe(snap["ret_1m"]),
             safe(snap["ret_5m"]),
@@ -588,7 +725,7 @@ class TradingEngine:
             (safe(snap["ema_slow"]) / price) - 1,
             safe(snap["vol_ratio"]),
             safe(snap["rsi_14"]) / 100.0,
-            signal_score,
+            time_in_candle,
         ]
         return np.array(features, dtype=np.float32)
 
@@ -644,21 +781,73 @@ class TradingEngine:
         return (side == "up") == btc_went_up
 
     async def _sync_balance(self):
-        """Log wallet USDC for reference (does NOT overwrite bankroll).
+        """Reconcile internal bankroll with on-chain USDC balance.
 
-        Bankroll is tracked internally via resolve_trade() PnL to include
-        unredeemed outcome tokens, not just liquid USDC.
+        If drift exceeds $0.50, update bankroll to match reality.
+        Caches wallet balance for dashboard display.
         """
         dry_run = get("dry_run", True)
         if dry_run:
             return
         try:
             from bot.executor import fetch_wallet_balance
-            balance = fetch_wallet_balance()
-            if balance is not None:
-                logger.info("Wallet USDC (reference only): $%.2f", balance)
+            wallet_balance = fetch_wallet_balance()
+            if wallet_balance is None:
+                return
+
+            self._cached_wallet_balance = wallet_balance
+            bankroll = await state.get("bankroll", 0.0)
+            drift = abs(wallet_balance - bankroll)
+
+            if drift > 0.50:
+                logger.warning(
+                    "Balance drift detected: wallet=$%.2f vs bankroll=$%.2f (drift=$%.2f). "
+                    "Updating bankroll to wallet value.",
+                    wallet_balance, bankroll, drift,
+                )
+                await state.set("bankroll", wallet_balance)
+            else:
+                logger.info(
+                    "Balance sync OK: wallet=$%.2f bankroll=$%.2f (drift=$%.2f)",
+                    wallet_balance, bankroll, drift,
+                )
         except Exception as e:
-            logger.warning("Balance check failed: %s", e)
+            logger.warning("Balance sync failed: %s", e)
+
+    async def _process_pending_redeems(self):
+        """Retry failed auto-redeems. Max 5 retries per item."""
+        if not self._pending_redeems:
+            return
+
+        from bot.wallet import redeem_positions
+
+        still_pending = []
+        for item in self._pending_redeems:
+            item["retries"] += 1
+            if item["retries"] > 5:
+                logger.warning(
+                    "Giving up on redeem for condition %s after 5 retries",
+                    item["condition_id"][:16],
+                )
+                continue
+            try:
+                r = await redeem_positions(item["condition_id"], [item["index_set"]])
+                if r.success:
+                    logger.info(
+                        "Retry redeem OK: condition=%s tx=%s",
+                        item["condition_id"][:16], r.tx_hash,
+                    )
+                else:
+                    logger.warning(
+                        "Retry redeem failed (attempt %d): %s",
+                        item["retries"], r.error,
+                    )
+                    still_pending.append(item)
+            except Exception as e:
+                logger.warning("Retry redeem error (attempt %d): %s", item["retries"], e)
+                still_pending.append(item)
+
+        self._pending_redeems = still_pending
 
     async def _check_daily_reset(self):
         """Reset daily counters at midnight UTC."""
@@ -697,11 +886,13 @@ class TradingEngine:
             "cooldown_remaining": cooldown,
             "circuit_breaker": circuit_breaker,
             "daily_loss_limit_pct": get("daily_loss_limit_pct", 0.15),
+            "trade_threshold": get("trade_threshold", 0.06),
             "price_buffer_size": self.price_buffer.size,
             "current_price": self.price_buffer.current_price,
             "dry_run": get("dry_run", True),
             "has_creds": has_polymarket_creds(),
-            "signals": compute_signal(
+            "wallet_balance": self._cached_wallet_balance,
+            "signals": self._last_signals or compute_signal(
                 self.price_buffer,
                 self.polymarket_ws,
                 self.rag_signal,

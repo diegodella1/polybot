@@ -21,8 +21,10 @@ POLYGON_RPCS = [
 
 # --- Contract addresses (Polygon mainnet) ---
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")  # USDC.e (bridged)
+USDT = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")  # USDT (PoS)
 CTF_ADDRESS = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")  # ConditionalTokens
 PROXY_WALLET = Web3.to_checksum_address("0x73abf22e40DA48E684f5CC705F5d759A64e0b1E6")  # Polymarket proxy
+UNISWAP_V3_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
 # Minimal ABIs
 ERC20_ABI = [
@@ -50,11 +52,56 @@ ERC20_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+UNISWAP_V3_ROUTER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "tokenIn", "type": "address"},
+                    {"name": "tokenOut", "type": "address"},
+                    {"name": "fee", "type": "uint24"},
+                    {"name": "recipient", "type": "address"},
+                    {"name": "deadline", "type": "uint256"},
+                    {"name": "amountIn", "type": "uint256"},
+                    {"name": "amountOutMinimum", "type": "uint256"},
+                    {"name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            }
+        ],
+        "name": "exactInputSingle",
+        "outputs": [{"name": "amountOut", "type": "uint256"}],
+        "stateMutability": "payable",
+        "type": "function",
+    },
 ]
 
 CTF_ABI = [
     {
-        "inputs": [{"name": "id", "type": "uint256"}, {"name": "owner", "type": "address"}],
+        "inputs": [{"name": "account", "type": "address"}, {"name": "id", "type": "uint256"}],
         "name": "balanceOf",
         "outputs": [{"name": "", "type": "uint256"}],
         "stateMutability": "view",
@@ -158,7 +205,7 @@ def get_token_balance(token_id: str) -> float:
     w3, account = _get_account()
     ctf = w3.eth.contract(address=CTF_ADDRESS, abi=CTF_ABI)
     token_int = int(token_id) if not token_id.startswith("0x") else int(token_id, 16)
-    raw = ctf.functions.balanceOf(token_int, account.address).call()
+    raw = ctf.functions.balanceOf(account.address, token_int).call()
     return raw / 1e6
 
 
@@ -205,7 +252,7 @@ def scan_redeemable_tokens() -> list[dict]:
     rows = conn.execute(
         """SELECT condition_id, side, token_id, GROUP_CONCAT(id) as trade_ids
            FROM trades
-           WHERE outcome = 'win'
+           WHERE outcome IN ('win', 'take_profit')
            GROUP BY condition_id, side"""
     ).fetchall()
     conn.close()
@@ -224,7 +271,7 @@ def scan_redeemable_tokens() -> list[dict]:
             pos_id = get_position_id(condition_id, index_set)
 
             # Check balance
-            balance_raw = ctf.functions.balanceOf(pos_id, account.address).call()
+            balance_raw = ctf.functions.balanceOf(account.address, pos_id).call()
             if balance_raw > 0:
                 balance = balance_raw / 1e6
                 redeemable.append({
@@ -349,3 +396,123 @@ def _transfer_sync(to_address: str, amount_usd: float) -> WalletResult:
     else:
         logger.error("Transfer reverted: %s", hex_hash)
         return WalletResult(success=False, tx_hash=hex_hash, error="Transaction reverted")
+
+
+# --- Swap functions ---
+
+def get_usdt_balance() -> float:
+    """Get USDT balance of EOA wallet on Polygon."""
+    w3, account = _get_account()
+    usdt = w3.eth.contract(address=USDT, abi=ERC20_ABI)
+    raw = usdt.functions.balanceOf(account.address).call()
+    return raw / 1e6
+
+
+async def swap_usdt_to_usdce(amount_usd: float | None = None) -> WalletResult:
+    """Swap USDT → USDC.e via Uniswap V3 on Polygon.
+
+    Args:
+        amount_usd: Amount to swap. If None, swaps entire USDT balance.
+    """
+    try:
+        result = await asyncio.to_thread(_swap_usdt_sync, amount_usd)
+        return result
+    except Exception as e:
+        logger.error("Swap USDT→USDC.e failed: %s", e)
+        return WalletResult(success=False, error=str(e))
+
+
+def _swap_usdt_sync(amount_usd: float | None = None) -> WalletResult:
+    """Synchronous USDT→USDC.e swap via Uniswap V3."""
+    import time
+
+    w3, account = _get_account()
+    usdt = w3.eth.contract(address=USDT, abi=ERC20_ABI)
+
+    # Check USDT balance
+    usdt_balance_raw = usdt.functions.balanceOf(account.address).call()
+    usdt_balance = usdt_balance_raw / 1e6
+
+    if usdt_balance < 0.01:
+        return WalletResult(success=False, error=f"No USDT to swap (balance: ${usdt_balance:.2f})")
+
+    if amount_usd is None:
+        amount_raw = usdt_balance_raw  # Swap all
+        amount_usd = usdt_balance
+    else:
+        amount_raw = int(amount_usd * 1e6)
+        if amount_raw > usdt_balance_raw:
+            return WalletResult(
+                success=False,
+                error=f"Insufficient USDT: ${usdt_balance:.2f} < ${amount_usd:.2f}",
+            )
+
+    logger.info("Swapping $%.2f USDT → USDC.e via Uniswap V3", amount_usd)
+
+    # Step 1: Approve router to spend USDT (if needed)
+    allowance = usdt.functions.allowance(account.address, UNISWAP_V3_ROUTER).call()
+    if allowance < amount_raw:
+        logger.info("Approving USDT spend for Uniswap router...")
+        approve_tx = usdt.functions.approve(
+            UNISWAP_V3_ROUTER, 2**256 - 1  # Max approval (safe — router only takes amountIn)
+        ).build_transaction({
+            "from": account.address,
+            "nonce": w3.eth.get_transaction_count(account.address),
+            "gas": 60_000,
+            "maxFeePerGas": w3.eth.gas_price * 2,
+            "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+            "chainId": 137,
+        })
+        signed = account.sign_transaction(approve_tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        if receipt["status"] != 1:
+            return WalletResult(success=False, tx_hash=tx_hash.hex(), error="USDT approve reverted")
+        logger.info("USDT approved: tx=%s", tx_hash.hex())
+
+    # Step 2: Swap via exactInputSingle
+    router = w3.eth.contract(address=UNISWAP_V3_ROUTER, abi=UNISWAP_V3_ROUTER_ABI)
+
+    # 0.3% slippage for stablecoin pair (conservative)
+    min_out = int(amount_raw * 0.997)
+
+    swap_params = (
+        USDT,                           # tokenIn
+        USDC_E,                         # tokenOut
+        100,                            # fee (0.01%)
+        account.address,                # recipient
+        int(time.time()) + 300,         # deadline (5 min)
+        amount_raw,                     # amountIn
+        min_out,                        # amountOutMinimum
+        0,                              # sqrtPriceLimitX96 (no limit)
+    )
+
+    swap_tx = router.functions.exactInputSingle(swap_params).build_transaction({
+        "from": account.address,
+        "nonce": w3.eth.get_transaction_count(account.address),
+        "gas": 200_000,
+        "maxFeePerGas": w3.eth.gas_price * 2,
+        "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+        "chainId": 137,
+    })
+
+    signed = account.sign_transaction(swap_tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+    hex_hash = tx_hash.hex()
+    if receipt["status"] == 1:
+        # Check new USDC.e balance
+        usdc = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+        new_balance = usdc.functions.balanceOf(account.address).call() / 1e6
+        logger.info(
+            "Swap OK: $%.2f USDT → USDC.e | tx=%s | new USDC.e balance=$%.2f",
+            amount_usd, hex_hash, new_balance,
+        )
+        return WalletResult(
+            success=True, tx_hash=hex_hash,
+            details={"amount_in": amount_usd, "usdc_balance": new_balance},
+        )
+    else:
+        logger.error("Swap reverted: %s", hex_hash)
+        return WalletResult(success=False, tx_hash=hex_hash, error="Swap transaction reverted")

@@ -5,6 +5,7 @@ let ws = null;
 let wsRetries = 0;
 let equityChart = null;
 let prevBtcPrice = null;
+let currentTradeThreshold = 0.06;
 const activityLog = [];  // max 8 entries
 const MAX_ACTIVITY = 8;
 
@@ -30,7 +31,13 @@ function connectWS() {
 
     ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
-        if (msg.event === 'trade') handleTrade(msg.data);
+        if (msg.event === 'trade') {
+            if (msg.data.event_type === 'position_update') {
+                handlePositionUpdate(msg.data);
+            } else {
+                handleTrade(msg.data);
+            }
+        }
         if (msg.event === 'signal') handleSignal(msg.data);
         if (msg.event === 'status') handleStatus(msg.data);
         if (msg.event === 'round_update') handleRoundUpdate(msg.data);
@@ -127,6 +134,9 @@ function animateValue(el, end, prefix, suffix, decimals) {
 
 // --- Update UI ---
 function updateStatus(data) {
+    // Sync trade threshold from config
+    if (data.trade_threshold) currentTradeThreshold = data.trade_threshold;
+
     // Status badge
     const badge = document.getElementById('statusBadge');
     const text = document.getElementById('statusText');
@@ -144,6 +154,12 @@ function updateStatus(data) {
     const bankroll = data.bankroll || 0;
     const bankrollEl = document.getElementById('bankroll');
     animateValue(bankrollEl, bankroll, '$', '', 2);
+
+    // Wallet balance (on-chain)
+    const walletEl = document.getElementById('walletBalance');
+    if (walletEl && data.wallet_balance != null) {
+        walletEl.textContent = `Wallet: $${data.wallet_balance.toFixed(2)}`;
+    }
 
     // Daily PnL
     const dailyPnl = data.daily_pnl || 0;
@@ -281,16 +297,16 @@ function updateGaugeExplanation(value) {
         return;
     }
 
-    const threshold = 0.10;
+    const threshold = currentTradeThreshold || 0.06;
     if (Math.abs(value) >= threshold) {
         const dir = value > 0 ? 'UP' : 'DOWN';
-        el.textContent = `Señal fuerte — buscando oportunidad de compra ${dir}`;
+        el.textContent = `Señal tradeable (${Math.abs(value).toFixed(3)} ≥ ${threshold}) — ${dir}`;
         el.style.color = 'var(--green)';
-    } else if (value === 0 && value === 0) {
+    } else if (value === 0) {
         el.textContent = 'Calculando señales...';
         el.style.color = 'var(--text-dim)';
     } else {
-        el.textContent = 'Señal presente pero insuficiente para tradear';
+        el.textContent = `Señal débil (${Math.abs(value).toFixed(3)} < ${threshold})`;
         el.style.color = 'var(--yellow)';
     }
 }
@@ -353,7 +369,7 @@ function renderTrades(trades, flash) {
 
     // Summary stats
     const resolved = trades.filter(t => t.outcome);
-    const wins = resolved.filter(t => t.outcome === 'win').length;
+    const wins = resolved.filter(t => t.outcome === 'win' || t.outcome === 'take_profit').length;
     const total = resolved.length;
 
     if (total > 0) {
@@ -382,16 +398,21 @@ function renderTrades(trades, flash) {
         const sideLabel = t.side === 'up' ? 'UP \u25b2' : 'DOWN \u25bc';
 
         let resultHtml;
-        if (t.outcome === 'win') {
-            resultHtml = `<span class="badge badge-win">+$${(t.pnl || 0).toFixed(2)}</span>`;
-        } else if (t.outcome === 'loss') {
-            resultHtml = `<span class="badge badge-loss">-$${Math.abs(t.pnl || 0).toFixed(2)}</span>`;
-        } else {
+        if (t.outcome === 'win' || t.outcome === 'take_profit') {
+            const label = t.outcome === 'take_profit' ? 'TP' : '';
+            resultHtml = `<span class="badge badge-win">${label} +$${(t.pnl || 0).toFixed(2)}</span>`;
+        } else if (t.outcome === 'loss' || t.outcome === 'stop_loss') {
+            const label = t.outcome === 'stop_loss' ? 'SL' : '';
+            resultHtml = `<span class="badge badge-loss">${label} -$${Math.abs(t.pnl || 0).toFixed(2)}</span>`;
+        } else if (!t.outcome) {
             resultHtml = `<span class="badge badge-pending">PENDING</span>`;
+        } else {
+            resultHtml = `<span class="badge badge-pending">${t.outcome.toUpperCase()}</span>`;
         }
 
         const btcLabel = t.btc_price ? `$${Number(t.btc_price).toLocaleString('en-US', {maximumFractionDigits: 0})}` : '—';
 
+        tr.dataset.tradeId = t.id || '';
         tr.innerHTML = `
             <td>${time}</td>
             <td>${(t.signal_score || 0).toFixed(2)}</td>
@@ -399,9 +420,30 @@ function renderTrades(trades, flash) {
             <td>$${(t.size_usd || 0).toFixed(2)}</td>
             <td>${(t.entry_price || 0).toFixed(2)}\u00a2</td>
             <td>${btcLabel}</td>
-            <td>${resultHtml}</td>
+            <td class="result-cell">${resultHtml}</td>
         `;
         body.appendChild(tr);
+    }
+}
+
+// --- Live Position Update ---
+function handlePositionUpdate(data) {
+    const { trade_id, current_bid, unrealized_pnl, unrealized_pct, elapsed, wait_seconds } = data;
+    // Find the row for this trade
+    const rows = document.querySelectorAll('#tradesBody tr');
+    for (const row of rows) {
+        if (row.dataset.tradeId == trade_id) {
+            const cell = row.querySelector('.result-cell');
+            if (!cell) break;
+            const isPositive = unrealized_pnl >= 0;
+            const badgeClass = isPositive ? 'badge-win' : 'badge-loss';
+            const sign = isPositive ? '+' : '';
+            const pct = isPositive ? `+${unrealized_pct}%` : `${unrealized_pct}%`;
+            const timeLeft = Math.max(0, Math.round((wait_seconds - elapsed) / 60));
+            const bidLabel = (current_bid * 100).toFixed(0);
+            cell.innerHTML = `<span class="badge ${badgeClass} badge-live">${sign}$${unrealized_pnl.toFixed(2)} (${pct})<br><small>${bidLabel}¢ · ${timeLeft}m</small></span>`;
+            break;
+        }
     }
 }
 

@@ -7,14 +7,14 @@ from db import get_db
 
 logger = logging.getLogger(__name__)
 
-MIN_PATTERNS_FOR_SIGNAL = 100
+MIN_PATTERNS_FOR_SIGNAL = 20
 TOP_K = 10
 
 
 class PatternStore:
     def __init__(self):
         self._matrix: np.ndarray | None = None  # (N, 8) features
-        self._outcomes: list[str] = []  # 'up' or 'down'
+        self._outcomes: list[str] = []  # 'win' or 'loss'
         self._norms: np.ndarray | None = None
         self._loaded = False
 
@@ -100,8 +100,8 @@ class PatternStore:
         top_k_idx = np.argsort(similarities)[-TOP_K:]
         top_outcomes = [self._outcomes[i] for i in top_k_idx]
 
-        up_count = sum(1 for o in top_outcomes if o == "up")
-        win_ratio = up_count / len(top_outcomes)
+        win_count = sum(1 for o in top_outcomes if o == "win")
+        win_ratio = win_count / len(top_outcomes)
 
         # Convert to signal: 0.5 → 0, 0.7 → +0.4, 0.3 → -0.4
         signal = (win_ratio - 0.5) * 2.0

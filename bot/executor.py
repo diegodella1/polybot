@@ -302,16 +302,32 @@ async def exit_position(
                 side=SELL,
             ),
         )
-        order = client.post_order(signed_order, orderType=OrderType.GTC)
+        # FOK = fill-or-kill: fills immediately or fails, no resting order
+        order = client.post_order(signed_order, orderType=OrderType.FOK)
 
         if not order or not order.get("orderID"):
-            logger.error("Stop-loss SELL order rejected")
+            logger.error("Exit SELL order rejected (FOK)")
             return {"success": False, "exit_price": 0, "proceeds": 0}
 
         order_id = order["orderID"]
+
+        # Verify FOK fill — check order status
+        import asyncio
+        await asyncio.sleep(2)
+        try:
+            order_status = client.get_order(order_id)
+            status = (order_status or {}).get("status", "").lower()
+            if status not in ("matched", "filled"):
+                logger.warning("FOK exit not filled (status=%s), order=%s", status, order_id)
+                return {"success": False, "exit_price": 0, "proceeds": 0}
+        except Exception as e:
+            logger.warning("Could not verify FOK fill: %s", e)
+            # Conservative: assume not filled
+            return {"success": False, "exit_price": 0, "proceeds": 0}
+
         proceeds = round(int_shares * exit_price, 2)
         logger.info(
-            "STOP-LOSS SELL: %d shares @ %.4f | order=%s | proceeds=$%.2f",
+            "EXIT SELL (FOK): %d shares @ %.4f | order=%s | proceeds=$%.2f",
             int_shares, exit_price, order_id, proceeds,
         )
         return {"success": True, "exit_price": exit_price, "proceeds": proceeds}

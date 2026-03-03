@@ -20,9 +20,11 @@ def kelly_size(
         "reason": "",
     }
 
-    # Guard: invalid price or tiny bankroll
-    if entry_price <= 0.01 or entry_price >= 0.99:
-        no_trade["reason"] = f"Entry price {entry_price} out of safe range [0.01, 0.99]"
+    # Guard: price outside safe range (risk/reward inverted at extremes)
+    min_ep = get("min_entry_price", 0.25)
+    max_ep = get("max_entry_price", 0.75)
+    if entry_price < min_ep or entry_price > max_ep:
+        no_trade["reason"] = f"Entry price {entry_price:.2f} outside safe range [{min_ep}, {max_ep}]"
         return no_trade
 
     if bankroll < 5.0:
@@ -30,13 +32,15 @@ def kelly_size(
         return no_trade
 
     # Signal-proportional sizing:
-    # |signal| 0.10 → base_pct, |signal| 1.0 → max_trade_pct
+    # At threshold → base_pct, at strong signal → max_trade_pct
     sig = abs(signal_strength)
-    base_pct = get("base_trade_pct", 0.07)    # 7% at threshold (~$1 with $14 bankroll)
-    max_trade_pct = get("max_trade_pct", 0.08)  # 8% at max signal
+    threshold = get("trade_threshold", 0.06)
+    base_pct = get("base_trade_pct", 0.07)
+    max_trade_pct = get("max_trade_pct", 0.12)
 
-    # Linear interpolation: stronger signal → bigger fraction
-    t = min(sig / 0.5, 1.0)  # normalize signal to 0..1 (0.5 = very strong)
+    # Linear interpolation using real range: threshold → 0.5 (strong signal)
+    max_sig = 0.5
+    t = min((sig - threshold) / (max_sig - threshold), 1.0) if sig > threshold else 0.0
     fraction = base_pct + t * (max_trade_pct - base_pct)
 
     size_usd = bankroll * fraction
@@ -46,8 +50,8 @@ def kelly_size(
     if size_usd < min_trade:
         size_usd = min_trade
 
-    # Cap: max 20% of bankroll
-    size_usd = min(size_usd, bankroll * 0.20)
+    # Cap: respect max_trade_pct from config
+    size_usd = min(size_usd, bankroll * max_trade_pct)
 
     # Calculate shares
     shares = size_usd / entry_price
