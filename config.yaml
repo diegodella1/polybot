@@ -7,11 +7,11 @@ max_exposure_usd: 5
 
 # === Entry filters ===
 # Only trade near-50/50 markets (sweet spot for binary options)
-min_entry_price: 0.42
-max_entry_price: 0.58
-trade_threshold: 0.10
+min_entry_price: 0.35
+max_entry_price: 0.65
+trade_threshold: 0.07
 max_spread_cents: 5
-min_time_remaining_sec: 90
+min_time_remaining_sec: 40
 
 # === Stop-loss / Take-profit ===
 # Wider SL (binary market bids bounce a lot), faster TP

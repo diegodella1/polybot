@@ -439,10 +439,7 @@ function handlePositionUpdate(data) {
             const isPositive = unrealized_pnl >= 0;
             const badgeClass = isPositive ? 'badge-win' : 'badge-loss';
             const sign = isPositive ? '+' : '';
-            const pct = isPositive ? `+${unrealized_pct}%` : `${unrealized_pct}%`;
-            const timeLeft = Math.max(0, Math.round((wait_seconds - elapsed) / 60));
-            const bidLabel = (current_bid * 100).toFixed(0);
-            cell.innerHTML = `<span class="badge ${badgeClass} badge-live">${sign}$${unrealized_pnl.toFixed(2)} (${pct})<br><small>${bidLabel}¢ · ${timeLeft}m</small></span>`;
+            cell.innerHTML = `<span class="badge ${badgeClass} badge-live">${sign}${unrealized_pct}%</span>`;
             break;
         }
     }
