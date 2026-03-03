@@ -7,7 +7,7 @@ from db import get_db
 
 logger = logging.getLogger(__name__)
 
-MIN_PATTERNS_FOR_SIGNAL = 20
+MIN_PATTERNS_FOR_SIGNAL = 10
 TOP_K = 10
 
 

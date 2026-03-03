@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS patterns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id INTEGER REFERENCES trades(id),
     features BLOB NOT NULL,
-    outcome TEXT NOT NULL CHECK(outcome IN ('up', 'down')),
+    outcome TEXT NOT NULL CHECK(outcome IN ('win', 'loss')),
     created_at TEXT DEFAULT (datetime('now'))
 );
 
