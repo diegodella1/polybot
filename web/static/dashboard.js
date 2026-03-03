@@ -194,6 +194,16 @@ function updateStatus(data) {
         bar.className = 'progress-fill' + (pct > 80 ? ' danger' : pct > 50 ? ' warning' : '');
     }
 
+    // Drawdown multiplier
+    const ddEl = document.getElementById('riskDrawdown');
+    if (ddEl && data.drawdown_multiplier != null) {
+        const mult = data.drawdown_multiplier;
+        ddEl.textContent = `${mult.toFixed(2)}x`;
+        ddEl.style.color = mult >= 0.9 ? 'var(--green)' : mult >= 0.5 ? 'var(--yellow)' : 'var(--red)';
+        const ddIcon = ddEl.closest('.risk-item')?.querySelector('.risk-icon');
+        if (ddIcon) ddIcon.className = 'risk-icon ' + (mult >= 0.9 ? 'green' : mult >= 0.5 ? 'yellow' : 'red');
+    }
+
     // Cooldown
     const cdEl = document.getElementById('riskCooldown');
     cdEl.textContent = data.cooldown_remaining > 0 ? `${data.cooldown_remaining} rounds` : 'No';
@@ -212,6 +222,24 @@ function updateStatus(data) {
     } else {
         cbEl.textContent = 'OK';
         cbEl.style.color = 'var(--green)';
+    }
+
+    // Invert UP signal flag
+    const invertEl = document.getElementById('riskInvert');
+    if (invertEl) {
+        const on = data.invert_up_signal;
+        invertEl.textContent = on ? 'ON' : 'OFF';
+        invertEl.style.color = on ? 'var(--yellow)' : 'var(--text-dim)';
+        const invertIcon = invertEl.closest('.risk-item')?.querySelector('.risk-icon');
+        if (invertIcon) invertIcon.className = 'risk-icon ' + (on ? 'yellow' : 'green');
+    }
+
+    // Trade cooldown
+    const tcdEl = document.getElementById('riskTradeCooldown');
+    if (tcdEl) {
+        const cd = data.trade_cooldown_seconds || 0;
+        tcdEl.textContent = cd > 0 ? `${Math.floor(cd / 60)}m` : 'Off';
+        tcdEl.style.color = cd > 0 ? 'var(--accent)' : 'var(--text-dim)';
     }
 
     // Signals

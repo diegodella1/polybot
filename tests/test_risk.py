@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
 import asyncio
+import time
 from unittest.mock import AsyncMock, patch
 
 
@@ -59,20 +60,34 @@ class TestRiskCheck:
         assert "threshold" in result.reason.lower()
 
     @pytest.mark.asyncio
-    async def test_daily_loss_limit(self, mock_state):
+    async def test_bankroll_floor(self, mock_state):
         from bot.risk import check_risk
         mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
             "enabled": True,
-            "daily_pnl": -50.0,  # 50% loss on $100 bankroll (exceeds 45% limit)
             "consecutive_losses": 0,
             "cooldown_remaining": 0,
             "current_exposure": 0.0,
             "has_open_position": False,
         }.get(k, d))
 
-        result = await check_risk(0.5, 100.0)
+        result = await check_risk(0.5, 3.0)  # below $5 floor
         assert not result
-        assert "daily loss" in result.reason.lower()
+        assert "floor" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_daily_loss_no_longer_blocks(self, mock_state):
+        from bot.risk import check_risk
+        mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
+            "enabled": True,
+            "consecutive_losses": 0,
+            "cooldown_remaining": 0,
+            "current_exposure": 0.0,
+            "has_open_position": False,
+        }.get(k, d))
+
+        # Large daily loss should NOT block — sizing handles drawdown now
+        result = await check_risk(0.5, 100.0)
+        assert result
 
     @pytest.mark.asyncio
     async def test_open_position_blocked(self, mock_state):
@@ -89,6 +104,39 @@ class TestRiskCheck:
         result = await check_risk(0.5, 100.0)
         assert not result
         assert "position" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_trade_cooldown_blocks(self, mock_state):
+        from bot.risk import check_risk
+        # Last trade was 30 seconds ago, cooldown is 600s
+        mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
+            "enabled": True,
+            "consecutive_losses": 0,
+            "cooldown_remaining": 0,
+            "current_exposure": 0.0,
+            "has_open_position": False,
+            "last_trade_timestamp": time.time() - 30,  # 30s ago
+        }.get(k, d))
+
+        result = await check_risk(0.5, 100.0)
+        assert not result
+        assert "trade cooldown" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_trade_cooldown_expired_allows(self, mock_state):
+        from bot.risk import check_risk
+        # Last trade was 700 seconds ago, cooldown is 600s → should pass
+        mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
+            "enabled": True,
+            "consecutive_losses": 0,
+            "cooldown_remaining": 0,
+            "current_exposure": 0.0,
+            "has_open_position": False,
+            "last_trade_timestamp": time.time() - 700,
+        }.get(k, d))
+
+        result = await check_risk(0.5, 100.0)
+        assert result
 
     @pytest.mark.asyncio
     async def test_allowed_trade(self, mock_state):

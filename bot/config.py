@@ -18,6 +18,8 @@ _VALIDATORS = {
     "min_trade_usd": (0.5, 50.0),
     "max_exposure_usd": (1.0, 1000.0),
     "daily_loss_limit_pct": (0.01, 0.50),
+    "min_drawdown_multiplier": (0.1, 1.0),
+    "bankroll_floor_usd": (2.0, 50.0),
     "trade_threshold": (0.01, 0.90),
     "max_spread_cents": (1, 20),
     "min_time_remaining_sec": (10, 300),
@@ -30,6 +32,7 @@ _VALIDATORS = {
     "min_win_rate": (0.30, 0.60),
     "min_estimated_winrate": (0.50, 0.70),
     "max_estimated_winrate": (0.55, 0.80),
+    "trade_cooldown_seconds": (0, 3600),
 }
 
 

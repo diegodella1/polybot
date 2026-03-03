@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
-from bot.sizing import kelly_size
+from bot.sizing import kelly_size, _drawdown_multiplier
 
 
 class TestKellySize:
@@ -25,8 +25,8 @@ class TestKellySize:
         assert result["size_usd"] > 0
 
     def test_trades_at_any_entry_price(self):
-        # Should trade within configured price range [0.35, 0.65]
-        for price in [0.40, 0.50, 0.55, 0.60]:
+        # Should trade within configured price range [0.35, 0.55]
+        for price in [0.38, 0.45, 0.50, 0.55]:
             result = kelly_size(0.25, price, 50.0)
             assert result["size_usd"] > 0, f"Should trade at entry_price={price}"
 
@@ -51,7 +51,7 @@ class TestKellySize:
     def test_tiny_bankroll_rejected(self):
         result = kelly_size(0.5, 0.50, 3.0)
         assert result["size_usd"] == 0
-        assert "too low" in result["reason"].lower()
+        assert "floor" in result["reason"].lower()
 
     def test_extreme_price_rejected(self):
         result = kelly_size(0.5, 0.005, 100.0)
@@ -63,3 +63,40 @@ class TestKellySize:
         # FOK min is $1 USD — sizing should floor to it
         result = kelly_size(0.10, 0.50, 15.0)
         assert result["size_usd"] >= 1.0
+
+
+class TestDrawdownMultiplier:
+    def test_no_loss_returns_one(self):
+        assert _drawdown_multiplier(0.0, 100.0) == 1.0
+
+    def test_profit_returns_one(self):
+        assert _drawdown_multiplier(5.0, 100.0) == 1.0
+
+    def test_at_limit_returns_min(self):
+        # daily_loss_limit_pct=0.15, min_drawdown_multiplier=0.25
+        # $15 loss on $100 bankroll = 15% = exactly at limit
+        mult = _drawdown_multiplier(-15.0, 100.0)
+        assert abs(mult - 0.25) < 0.01
+
+    def test_halfway_loss(self):
+        # 7.5% loss = halfway to 15% limit → multiplier ~0.625
+        mult = _drawdown_multiplier(-7.5, 100.0)
+        assert 0.60 < mult < 0.66
+
+    def test_beyond_limit_floors_at_min(self):
+        # Loss exceeds limit — clamp at min multiplier
+        mult = _drawdown_multiplier(-30.0, 100.0)
+        assert abs(mult - 0.25) < 0.01
+
+    def test_sizing_uses_multiplier(self):
+        # No loss → normal size
+        normal = kelly_size(0.3, 0.50, 100.0, daily_pnl=0.0)
+        # At loss limit → reduced size
+        reduced = kelly_size(0.3, 0.50, 100.0, daily_pnl=-15.0)
+        assert reduced["size_usd"] < normal["size_usd"]
+        assert reduced["drawdown_multiplier"] < normal["drawdown_multiplier"]
+
+    def test_sizing_returns_multiplier_field(self):
+        result = kelly_size(0.3, 0.50, 100.0, daily_pnl=-7.5)
+        assert "drawdown_multiplier" in result
+        assert 0.0 < result["drawdown_multiplier"] < 1.0

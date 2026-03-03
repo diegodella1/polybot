@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 import numpy as np
@@ -252,10 +253,14 @@ class TradingEngine:
     def _risk_reason_es(self, reason: str) -> str:
         """Translate risk.reason to Spanish for the dashboard."""
         r = reason.lower()
-        if "daily loss" in r:
-            return "Riesgo: límite diario alcanzado"
+        if "below floor" in r:
+            return "Riesgo: bankroll debajo del mínimo de emergencia"
+        if "trade cooldown" in r:
+            import re
+            m = re.search(r"(\d+m\d+s)", reason)
+            remaining = m.group(1) if m else "?"
+            return f"Cooldown entre trades ({remaining})"
         if "cooldown" in r:
-            # Extract rounds remaining
             import re
             m = re.search(r"(\d+) rounds", reason)
             rounds = m.group(1) if m else "?"
@@ -356,10 +361,21 @@ class TradingEngine:
             )
             return
 
+        # Signal inversion: flip UP signals to DOWN (model predicts UP wrong)
+        original_composite = composite
+        original_dir = "UP" if composite > 0 else "DOWN"
+        inverted = False
+        if get("invert_up_signal", False) and composite > 0:
+            composite = -composite
+            inverted = True
+
         logger.info(
-            "Round %d | signal=%.3f | mom=%.3f skew=%s fv=%s rag=%.3f sent=%.3f",
+            "Round %d | signal=%.3f (original: %.3f %s%s) | mom=%.3f skew=%s fv=%s rag=%.3f sent=%.3f",
             self._round,
             composite,
+            original_composite,
+            original_dir,
+            " → inverted to DOWN" if inverted else "",
             signals["momentum"] or 0,
             f"{signals['book_skew']:.3f}" if signals["book_skew"] is not None else "N/A",
             f"{signals['fair_value']:.3f}" if signals["fair_value"] is not None else "N/A",
@@ -368,8 +384,11 @@ class TradingEngine:
         )
 
         threshold = get("trade_threshold", 0.15)
-        if not signals["tradeable"]:
-            logger.debug("Round %d: signal below threshold", self._round)
+        if abs(composite) < threshold:
+            logger.info(
+                "Signal: %.2f (original: %.2f %s) → SKIP: below threshold (%.2f)",
+                composite, original_composite, original_dir, threshold,
+            )
             await self._broadcast_round(
                 "skip",
                 f"Señal débil ({abs(composite):.2f} < {threshold} necesario)",
@@ -382,7 +401,10 @@ class TradingEngine:
         bankroll = await state.get("bankroll", 50.0)
         risk = await check_risk(composite, bankroll)
         if not risk:
-            logger.info("Round %d: risk check failed — %s", self._round, risk.reason)
+            logger.info(
+                "Signal: %.2f (original: %.2f %s) → SKIP: %s",
+                composite, original_composite, original_dir, risk.reason,
+            )
             await self._broadcast_round(
                 "skip",
                 self._risk_reason_es(risk.reason),
@@ -454,8 +476,8 @@ class TradingEngine:
         max_ep = get("max_entry_price", 0.75)
         if entry_price < min_ep or entry_price > max_ep:
             logger.info(
-                "Round %d: entry price %.2f outside [%.2f, %.2f], skipping",
-                self._round, entry_price, min_ep, max_ep,
+                "Signal: %.2f (original: %.2f %s) → SKIP: contract price %.2f outside [%.2f, %.2f]",
+                composite, original_composite, original_dir, entry_price, min_ep, max_ep,
             )
             await self._broadcast_round(
                 "skip",
@@ -480,7 +502,8 @@ class TradingEngine:
             )
             return
 
-        sizing = kelly_size(abs(composite), entry_price, bankroll)
+        daily_pnl = await state.get("daily_pnl", 0.0)
+        sizing = kelly_size(abs(composite), entry_price, bankroll, daily_pnl=daily_pnl)
         if sizing["size_usd"] <= 0:
             reason_en = sizing.get("reason", "no edge per Kelly")
             logger.info(
@@ -514,8 +537,16 @@ class TradingEngine:
             logger.warning("Round %d: execution failed — %s", self._round, result.error)
             return
 
-        # Broadcast trade decision
+        # Record trade timestamp for cooldown
+        await state.set("last_trade_timestamp", time.time())
+
+        # Enhanced trade logging
         side_label = "UP" if side == "up" else "DOWN"
+        inversion_note = f" (original: {original_composite:.2f} {original_dir} → inverted to DOWN)" if inverted else ""
+        logger.info(
+            "Signal: %.2f%s → TRADE: %s @ %.2f¢, size $%.2f",
+            composite, inversion_note, side_label, entry_price * 100, sizing["size_usd"],
+        )
         await self._broadcast_round(
             "trade",
             f"Trade ejecutado: {side_label} ${sizing['size_usd']:.2f}",
@@ -899,6 +930,7 @@ class TradingEngine:
 
         from bot.executor import has_polymarket_creds
         from bot.risk import _recent_win_rate
+        from bot.sizing import _drawdown_multiplier
 
         # Circuit breaker check
         circuit_breaker = False
@@ -915,11 +947,14 @@ class TradingEngine:
             "round": self._round,
             "bankroll": bankroll,
             "daily_pnl": daily_pnl,
+            "drawdown_multiplier": round(_drawdown_multiplier(daily_pnl, bankroll), 2),
             "consecutive_losses": consec_losses,
             "cooldown_remaining": cooldown,
             "circuit_breaker": circuit_breaker,
+            "invert_up_signal": get("invert_up_signal", False),
+            "trade_cooldown_seconds": get("trade_cooldown_seconds", 0),
             "daily_loss_limit_pct": get("daily_loss_limit_pct", 0.15),
-            "trade_threshold": get("trade_threshold", 0.06),
+            "trade_threshold": get("trade_threshold", 0.20),
             "price_buffer_size": self.price_buffer.size,
             "current_price": self.price_buffer.current_price,
             "dry_run": get("dry_run", True),

@@ -1,6 +1,7 @@
 """Risk manager — gatekeeper before every trade."""
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from bot.config import get
@@ -34,11 +35,10 @@ async def check_risk(signal_score: float, bankroll: float) -> RiskCheck:
     if abs(signal_score) < threshold:
         return RiskCheck(False, f"Signal {signal_score:.3f} below threshold {threshold}")
 
-    # 3. Daily loss limit
-    daily_pnl = await state.get("daily_pnl", 0.0)
-    daily_limit = get("daily_loss_limit_pct", 0.15)
-    if daily_pnl < 0 and abs(daily_pnl) >= bankroll * daily_limit:
-        return RiskCheck(False, f"Daily loss limit hit: ${daily_pnl:.2f}")
+    # 3. Bankroll floor (emergency stop)
+    bankroll_floor = get("bankroll_floor_usd", 5.0)
+    if bankroll < bankroll_floor:
+        return RiskCheck(False, f"Bankroll ${bankroll:.2f} below floor ${bankroll_floor:.2f}")
 
     # 4. Consecutive losses → cooldown
     consec_losses = await state.get("consecutive_losses", 0)
@@ -71,6 +71,20 @@ async def check_risk(signal_score: float, bankroll: float) -> RiskCheck:
     has_open = await state.get("has_open_position", False)
     if has_open:
         return RiskCheck(False, "Position already open, waiting for resolution")
+
+    # 8. Trade cooldown (time-based)
+    cooldown_secs = get("trade_cooldown_seconds", 0)
+    if cooldown_secs > 0:
+        last_trade_ts = await state.get("last_trade_timestamp", 0.0)
+        elapsed = time.time() - last_trade_ts
+        if elapsed < cooldown_secs:
+            remaining = int(cooldown_secs - elapsed)
+            mins = remaining // 60
+            secs = remaining % 60
+            return RiskCheck(
+                False,
+                f"Trade cooldown: {mins}m{secs:02d}s remaining",
+            )
 
     return RiskCheck(True)
 
