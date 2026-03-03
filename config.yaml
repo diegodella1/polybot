@@ -25,9 +25,11 @@ cooldown_rounds: 8
 kelly_fraction: 0.5
 
 # === Circuit breaker ===
-min_win_rate: 0.40
-circuit_breaker_window: 15
-circuit_breaker_hours: 3
+# Lower threshold temporarily — old trades (bad config) poison the window
+# Once we have 30+ trades with new config, raise back to 0.40
+min_win_rate: 0.30
+circuit_breaker_window: 30
+circuit_breaker_hours: 2
 
 # === Signal weights ===
 # Reduce fair_value (too noisy), boost momentum + book_skew (more reliable)
