@@ -14,6 +14,11 @@ let statsDateFilter = 'all'; // 'all' | 'today' | 'YYYY-MM-DD'
 let lastStatusData = null;   // cache for re-rendering filtered stats
 
 // --- Init ---
+// Register service worker for PWA
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     initChart();
     fetchStatus();
