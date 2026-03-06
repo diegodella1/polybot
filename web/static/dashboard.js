@@ -519,7 +519,7 @@ function renderTrades(trades, flash) {
             const label = t.outcome === 'stop_loss' ? 'SL' : '';
             resultHtml = `<span class="badge badge-loss">${label} -$${Math.abs(t.pnl || 0).toFixed(2)}</span>`;
         } else if (!t.outcome) {
-            resultHtml = `<span class="badge badge-pending">PENDING</span>`;
+            resultHtml = `<span class="badge badge-pending badge-unclog" title="Click to resolve" onclick="unclogTrades(event)">PENDING</span>`;
         } else {
             resultHtml = `<span class="badge badge-pending">${t.outcome.toUpperCase()}</span>`;
         }
@@ -537,6 +537,38 @@ function renderTrades(trades, flash) {
             <td class="result-cell">${resultHtml}</td>
         `;
         body.appendChild(tr);
+    }
+}
+
+// --- Unclog Pending Trades ---
+async function unclogTrades(e) {
+    if (e) e.stopPropagation();
+    // Find all pending badges and show spinner
+    document.querySelectorAll('.badge-unclog').forEach(b => {
+        b.textContent = '...';
+        b.style.pointerEvents = 'none';
+    });
+    try {
+        const resp = await fetch('/api/trades/resolve-pending', { method: 'POST' });
+        if (resp.status === 401) {
+            // Need admin login — redirect
+            window.location.href = '/admin';
+            return;
+        }
+        const data = await resp.json();
+        if (data.remaining_pending === 0) {
+            fetchTrades();
+        } else {
+            document.querySelectorAll('.badge-unclog').forEach(b => {
+                b.textContent = 'PENDING';
+                b.style.pointerEvents = '';
+            });
+        }
+    } catch (err) {
+        document.querySelectorAll('.badge-unclog').forEach(b => {
+            b.textContent = 'PENDING';
+            b.style.pointerEvents = '';
+        });
     }
 }
 

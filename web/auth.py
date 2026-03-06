@@ -60,8 +60,8 @@ def create_session(response: Response) -> str:
         token,
         max_age=SESSION_MAX_AGE,
         httponly=True,
-        secure=True,
-        samesite="strict",
+        secure=False,
+        samesite="lax",
     )
     return token
 

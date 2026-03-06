@@ -174,6 +174,26 @@ def create_router(engine, ws_manager) -> APIRouter:
         save_config(data)
         return {"status": "ok"}
 
+    @router.post("/trades/resolve-pending")
+    async def resolve_pending(request: Request):
+        """Manually trigger resolution of pending trades."""
+        _require_admin(request)
+        _audit(request, "RESOLVE_PENDING")
+        bankroll = await state.get("bankroll", 0.0)
+        await engine._recover_pending_trades(bankroll)
+        # Return updated pending count
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT COUNT(*) as cnt FROM trades WHERE outcome IS NULL "
+                "AND (order_status IS NULL OR order_status = 'filled')"
+            )
+            row = await cursor.fetchone()
+            remaining = row["cnt"] if row else 0
+        finally:
+            await db.close()
+        return {"status": "ok", "remaining_pending": remaining}
+
     @router.post("/bot/start")
     async def start_bot(request: Request):
         _require_admin(request)

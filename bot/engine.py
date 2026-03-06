@@ -159,22 +159,28 @@ class TradingEngine:
                 logger.warning("Could not check resolution for trade %d: %s", trade_id, e)
 
             if won is None:
-                # CLOB API failed — try on-chain payoutNumerators
-                try:
-                    from bot.wallet import get_winning_outcome
-                    winning_side = get_winning_outcome(condition_id)
-                    if winning_side is not None:
-                        won = (winning_side == side)
-                        logger.info(
-                            "Trade %d: on-chain resolution %s won, our side=%s → %s",
-                            trade_id, winning_side.upper(), side.upper(),
-                            "WIN" if won else "LOSS",
-                        )
-                    else:
-                        logger.info("Trade %d: not yet resolved on-chain, leaving PENDING", trade_id)
-                        continue  # Skip — will retry on next startup
-                except Exception as e:
-                    logger.warning("Trade %d: on-chain check failed (%s), leaving PENDING", trade_id, e)
+                # CLOB API failed — try on-chain payoutNumerators with retries
+                from bot.wallet import get_winning_outcome
+                for oc_attempt in range(3):
+                    try:
+                        winning_side = get_winning_outcome(condition_id)
+                        if winning_side is not None:
+                            won = (winning_side == side)
+                            logger.info(
+                                "Trade %d: on-chain resolution %s won, our side=%s → %s",
+                                trade_id, winning_side.upper(), side.upper(),
+                                "WIN" if won else "LOSS",
+                            )
+                            break
+                        else:
+                            if oc_attempt < 2:
+                                await asyncio.sleep(10)
+                    except Exception as e:
+                        logger.warning("Trade %d: on-chain attempt %d failed (%s)", trade_id, oc_attempt + 1, e)
+                        if oc_attempt < 2:
+                            await asyncio.sleep(5)
+                if won is None:
+                    logger.info("Trade %d: not yet resolved, leaving PENDING", trade_id)
                     continue
 
             new_bankroll = await resolve_trade(trade_id, won, bankroll)
@@ -228,8 +234,8 @@ class TradingEngine:
                 if self._round % 5 == 0 and self._pending_redeems:
                     await self._process_pending_redeems()
 
-                # Resolve any pending trades every 30 rounds (~5 min)
-                if self._round % 30 == 15:
+                # Resolve any pending trades every 12 rounds (~1 min)
+                if self._round % 12 == 6:
                     bankroll = await state.get("bankroll", 0.0)
                     await self._recover_pending_trades(bankroll)
 
@@ -878,9 +884,10 @@ class TradingEngine:
                 await asyncio.sleep(5)
 
         # All CLOB retries exhausted — fallback to on-chain with retries
+        # 5-min markets can take up to ~2 min to resolve on-chain
         logger.warning("CLOB resolution not available after 4 retries, trying on-chain")
         from bot.wallet import get_winning_outcome
-        for on_chain_attempt in range(3):
+        for on_chain_attempt in range(8):
             try:
                 winning_side = get_winning_outcome(market.condition_id)
                 if winning_side is not None:
@@ -891,10 +898,10 @@ class TradingEngine:
                     )
                     return won
                 else:
-                    logger.info("On-chain attempt %d/3: not yet resolved, waiting 10s...", on_chain_attempt + 1)
-                    await asyncio.sleep(10)
+                    logger.info("On-chain attempt %d/8: not yet resolved, waiting 15s...", on_chain_attempt + 1)
+                    await asyncio.sleep(15)
             except Exception as e:
-                logger.warning("On-chain attempt %d/3 failed: %s", on_chain_attempt + 1, e)
+                logger.warning("On-chain attempt %d/8 failed: %s", on_chain_attempt + 1, e)
                 await asyncio.sleep(5)
 
         # All resolution methods exhausted — return None to leave trade PENDING

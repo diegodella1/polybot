@@ -383,6 +383,17 @@ tr:hover { background: var(--surface-hover); }
     color: var(--text-dim);
 }
 
+.badge-unclog {
+    cursor: pointer;
+    border: 1px dashed var(--yellow);
+    transition: background 0.2s;
+}
+
+.badge-unclog:hover {
+    background: var(--yellow-bg);
+    color: var(--yellow);
+}
+
 .badge-paper {
     background: var(--surface-3);
     color: var(--text-dim);
