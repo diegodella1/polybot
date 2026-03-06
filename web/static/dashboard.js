@@ -13,6 +13,27 @@ let roundCount = 0;
 let statsDateFilter = 'all'; // 'all' | 'today' | 'YYYY-MM-DD'
 let lastStatusData = null;   // cache for re-rendering filtered stats
 
+// Goal config
+const GOAL_TARGET = 1000;
+const GOAL_START_BALANCE = 42.71;
+const GOAL_START_DATE = new Date('2026-03-06T00:00:00Z');
+const GOAL_DAYS = 30;
+
+function updateGoal(currentBalance) {
+    const now = new Date();
+    const elapsed = (now - GOAL_START_DATE) / (1000 * 60 * 60 * 24);
+    const daysLeft = Math.max(0, Math.ceil(GOAL_DAYS - elapsed));
+    const pct = Math.min(100, Math.max(0, ((currentBalance - GOAL_START_BALANCE) / (GOAL_TARGET - GOAL_START_BALANCE)) * 100));
+
+    const fill = document.getElementById('goalFill');
+    const detail = document.getElementById('goalDetail');
+    const days = document.getElementById('goalDays');
+
+    if (fill) fill.style.width = pct.toFixed(1) + '%';
+    if (detail) detail.textContent = `$${currentBalance.toFixed(2)} / $${GOAL_TARGET} (${pct.toFixed(1)}%)`;
+    if (days) days.textContent = daysLeft > 0 ? `${daysLeft}d restantes` : 'Plazo cumplido';
+}
+
 // --- Init ---
 // Register service worker for PWA
 if ('serviceWorker' in navigator) {
@@ -234,6 +255,9 @@ function updateStatus(data) {
     const depositLine = `Invertido: $${initialDeposit.toFixed(2)}`;
     const unredeemedLine = unredeemed > 0 ? ` · Pendiente: $${unredeemed.toFixed(2)}` : '';
     document.getElementById('walletDeposit').textContent = depositLine + unredeemedLine;
+
+    // Goal tracker
+    updateGoal(realBal);
 
     // Daily PnL
     const dailyPnl = data.daily_pnl || 0;

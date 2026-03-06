@@ -420,6 +420,53 @@ tr:hover { background: var(--surface-hover); }
     50% { opacity: 0.7; }
 }
 
+/* ===== Goal Tracker ===== */
+.goal-bar {
+    padding: 10px 20px;
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+}
+
+.goal-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+    font-family: var(--font-sans);
+}
+
+.goal-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.5px;
+}
+
+.goal-detail {
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.goal-days {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: auto;
+}
+
+.goal-track {
+    height: 4px;
+    background: var(--surface-3);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.goal-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    border-radius: 2px;
+    transition: width 1s ease;
+}
+
 /* New trade flash */
 @keyframes flash-row {
     0% { background: var(--accent-bg); }
