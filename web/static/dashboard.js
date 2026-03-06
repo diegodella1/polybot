@@ -9,8 +9,7 @@ let chartRange = '7d';    // current chart filter
 let tradeMode = 'all';   // paper | live | all
 let prevBtcPrice = null;
 let currentTradeThreshold = 0.06;
-const activityLog = [];  // max 8 entries
-const MAX_ACTIVITY = 8;
+let roundCount = 0;
 let statsDateFilter = 'all'; // 'all' | 'today' | 'YYYY-MM-DD'
 let lastStatusData = null;   // cache for re-rendering filtered stats
 
@@ -427,46 +426,56 @@ function updateGaugeExplanation(value) {
     }
 }
 
-// --- Activity Log ---
+// --- Live Status Panel ---
 function handleRoundUpdate(data) {
+    roundCount++;
+
     const time = data.timestamp
-        ? new Date(data.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
-        : '--:--';
+        ? new Date(data.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : '--:--:--';
 
-    activityLog.unshift({
-        time,
-        decision: data.decision || 'skip',
-        reason: data.reason || '',
-    });
+    const decision = data.decision || 'skip';
+    const stateMap = { trade: 'TRADING', wait: 'WAITING', skip: 'SCANNING' };
+    const colorMap = { trade: 'var(--green)', wait: 'var(--text-dim)', skip: 'var(--yellow)' };
 
-    if (activityLog.length > MAX_ACTIVITY) {
-        activityLog.length = MAX_ACTIVITY;
+    const el = (id) => document.getElementById(id);
+
+    const stateEl = el('lsState');
+    if (stateEl) {
+        stateEl.textContent = stateMap[decision] || 'SCANNING';
+        stateEl.style.color = colorMap[decision] || 'var(--text-primary)';
     }
 
-    renderActivityLog();
-}
+    const marketEl = el('lsMarket');
+    if (marketEl) marketEl.textContent = data.market || '—';
 
-function renderActivityLog() {
-    const container = document.getElementById('activityLog');
-    if (!container) return;
-
-    container.innerHTML = '';
-
-    for (const entry of activityLog) {
-        const div = document.createElement('div');
-        div.className = 'activity-entry';
-
-        const badgeLabel = entry.decision === 'trade' ? 'TRADE'
-            : entry.decision === 'wait' ? 'WAIT' : 'SKIP';
-
-        div.innerHTML = `
-            <span class="activity-time">${entry.time}</span>
-            <span class="activity-dot ${entry.decision}"></span>
-            <span class="activity-reason">${entry.reason}</span>
-            <span class="activity-badge ${entry.decision}">${badgeLabel}</span>
-        `;
-        container.appendChild(div);
+    const signalEl = el('lsSignal');
+    if (signalEl) {
+        if (data.signal != null) {
+            const s = data.signal;
+            signalEl.textContent = (s > 0 ? '+' : '') + s.toFixed(3);
+            signalEl.style.color = s > 0 ? 'var(--green)' : s < 0 ? 'var(--red)' : 'var(--text-dim)';
+        } else {
+            signalEl.textContent = '—';
+            signalEl.style.color = 'var(--text-dim)';
+        }
     }
+
+    const decisionEl = el('lsDecision');
+    if (decisionEl) {
+        const badge = decision === 'trade' ? 'TRADE' : decision === 'wait' ? 'WAIT' : 'SKIP';
+        const reason = data.reason || '';
+        decisionEl.innerHTML = `<span style="color:${colorMap[decision]};font-weight:700;margin-right:6px">${badge}</span>${reason}`;
+    }
+
+    const roundsEl = el('lsRounds');
+    if (roundsEl) roundsEl.textContent = roundCount;
+
+    const timeEl = el('lsTime');
+    if (timeEl) timeEl.textContent = time;
+
+    const pulse = el('livePulse');
+    if (pulse) pulse.classList.add('active');
 }
 
 // --- Trades ---

@@ -228,6 +228,11 @@ class TradingEngine:
                 if self._round % 5 == 0 and self._pending_redeems:
                     await self._process_pending_redeems()
 
+                # Resolve any pending trades every 30 rounds (~5 min)
+                if self._round % 30 == 15:
+                    bankroll = await state.get("bankroll", 0.0)
+                    await self._recover_pending_trades(bankroll)
+
                 # Sync wallet balance every 10 rounds (~5 min)
                 # Skip if there are pending redeems (wait for tokens → USDC.e)
                 if self._round % 10 == 0 and not self._pending_redeems:
@@ -239,8 +244,8 @@ class TradingEngine:
             except Exception as e:
                 logger.error("Round error: %s", e, exc_info=True)
 
-            # Poll every 10 seconds for new markets
-            await asyncio.sleep(10)
+            # Poll every 5 seconds for new markets
+            await asyncio.sleep(5)
 
     async def _broadcast_round(self, decision: str, reason: str,
                                signal: float | None = None,

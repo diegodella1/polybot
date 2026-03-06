@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polybot</title>
-    <link rel="stylesheet" href="/static/style.css?v=11">
+    <link rel="stylesheet" href="/static/style.css?v=12">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
@@ -84,11 +84,37 @@
             </div>
         </div>
 
-        <!-- Activity Log -->
+        <!-- Live Status -->
         <div class="card" style="margin-bottom: 20px">
-            <div class="card-header">Bot Activity</div>
-            <div id="activityLog" class="activity-log">
-                <div class="activity-empty">Esperando actividad del bot...</div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="card-header" style="margin:0">Live Status</div>
+                <span class="live-pulse" id="livePulse"></span>
+            </div>
+            <div class="live-status-grid" id="liveStatus">
+                <div class="ls-item">
+                    <span class="ls-label">Estado</span>
+                    <span class="ls-value" id="lsState">OFFLINE</span>
+                </div>
+                <div class="ls-item">
+                    <span class="ls-label">Mercado</span>
+                    <span class="ls-value ls-mono" id="lsMarket">&mdash;</span>
+                </div>
+                <div class="ls-item">
+                    <span class="ls-label">Señal</span>
+                    <span class="ls-value" id="lsSignal">&mdash;</span>
+                </div>
+                <div class="ls-item ls-wide">
+                    <span class="ls-label">Última decisión</span>
+                    <span class="ls-value" id="lsDecision">&mdash;</span>
+                </div>
+                <div class="ls-item">
+                    <span class="ls-label">Rounds</span>
+                    <span class="ls-value ls-mono" id="lsRounds">0</span>
+                </div>
+                <div class="ls-item">
+                    <span class="ls-label">Último update</span>
+                    <span class="ls-value ls-mono" id="lsTime">&mdash;</span>
+                </div>
             </div>
         </div>
 
@@ -236,6 +262,6 @@
         &nbsp;&middot;&nbsp; NFA &middot; DYOR &middot; Use at your own risk
     </div>
 
-    <script src="/static/dashboard.js?v=25"></script>
+    <script src="/static/dashboard.js?v=26"></script>
 </body>
 </html>
