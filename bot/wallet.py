@@ -24,7 +24,7 @@ USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174") 
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")  # USDC (native)
 USDT = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")  # USDT (PoS)
 CTF_ADDRESS = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")  # ConditionalTokens
-PROXY_WALLET = Web3.to_checksum_address("0x73abf22e40DA48E684f5CC705F5d759A64e0b1E6")  # Polymarket proxy
+PROXY_WALLET = Web3.to_checksum_address(os.environ.get("POLYMARKET_PROXY_ADDRESS", "0x0000000000000000000000000000000000000000"))
 UNISWAP_V3_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
 # Minimal ABIs
