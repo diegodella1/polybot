@@ -614,191 +614,203 @@ class TradingEngine:
         if self.on_trade:
             await self.on_trade(trade_data)
 
-        # 6. RESOLVE — monitor for stop-loss, then wait for resolution
-        wait_seconds = min(
-            max(0, market.seconds_remaining + 10),
-            MAX_RESOLUTION_WAIT,
-        )
+        # 6. RESOLVE — launch monitoring + resolution in background
+        # so the main loop keeps running rounds and updating signals
+        asyncio.create_task(self._monitor_and_resolve(
+            market=market,
+            side=side,
+            token_id=token_id,
+            result=result,
+            bankroll=bankroll,
+            composite=composite,
+            market_name=market_name,
+        ))
 
-        stop_loss_pct = get("stop_loss_pct", 0.08)
-        take_profit_pct = get("take_profit_pct", 0.12)
-        stop_price = result.filled_price * (1 - stop_loss_pct)
-        take_profit_price = result.filled_price * (1 + take_profit_pct)
-        early_exit = None  # "stop_loss" or "take_profit"
-        exit_proceeds = None
-        exit_failed = False  # Don't retry after failure
-
-        logger.info(
-            "Monitoring %.0fs | entry=%.2f¢ stop=%.2f¢ (-%d%%) tp=%.2f¢ (+%d%%)",
-            wait_seconds, result.filled_price * 100, stop_price * 100,
-            int(stop_loss_pct * 100), take_profit_price * 100,
-            int(take_profit_pct * 100),
-        )
-
-        elapsed = 0
-        while elapsed < wait_seconds:
-            await asyncio.sleep(5)
-            elapsed += 5
-
-            # Refresh orderbook for current token
-            await self.polymarket_ws.subscribe(token_id)
-            await asyncio.sleep(1)
-            elapsed += 1
-
-            bid = self.polymarket_ws.orderbook.best_bid
-
-            # Broadcast live P&L to dashboard
-            if bid is not None and self.on_trade:
-                unrealized_pnl = (bid - result.filled_price) * result.shares
-                unrealized_pct = ((bid / result.filled_price) - 1) * 100 if result.filled_price > 0 else 0
-                await self.on_trade({
-                    "event_type": "position_update",
-                    "trade_id": result.trade_id,
-                    "current_bid": bid,
-                    "entry_price": result.filled_price,
-                    "unrealized_pnl": round(unrealized_pnl, 2),
-                    "unrealized_pct": round(unrealized_pct, 1),
-                    "elapsed": elapsed,
-                    "wait_seconds": wait_seconds,
-                })
-
-            if exit_failed or not get("use_tp_sl", True):
-                continue  # Skip SL/TP checks, wait for natural resolution
-
-            if bid is not None:
-                logger.debug(
-                    "Monitor: bid=%.2f¢ stop=%.2f¢ tp=%.2f¢",
-                    bid * 100, stop_price * 100, take_profit_price * 100,
-                )
-                if bid <= stop_price:
-                    logger.warning(
-                        "STOP-LOSS triggered: bid=%.2f¢ <= stop=%.2f¢",
-                        bid * 100, stop_price * 100,
-                    )
-                    exit_result = await exit_position(token_id, result.shares, bid)
-                    if exit_result["success"]:
-                        early_exit = "stop_loss"
-                        exit_proceeds = exit_result["proceeds"]
-                        break
-                    else:
-                        logger.warning("SL exit failed, holding to resolution")
-                        exit_failed = True
-                elif bid >= take_profit_price:
-                    logger.info(
-                        "TAKE-PROFIT triggered: bid=%.2f¢ >= tp=%.2f¢",
-                        bid * 100, take_profit_price * 100,
-                    )
-                    exit_result = await exit_position(token_id, result.shares, bid)
-                    if exit_result["success"]:
-                        early_exit = "take_profit"
-                        exit_proceeds = exit_result["proceeds"]
-                        break
-                    else:
-                        logger.warning("TP exit failed, holding to resolution")
-                        exit_failed = True
-
-        if early_exit:
-            new_bankroll = await resolve_trade(
-                result.trade_id, won=False, bankroll=bankroll,
-                exit_proceeds=exit_proceeds,
-                exit_type=early_exit,
+    async def _monitor_and_resolve(self, market, side, token_id, result,
+                                    bankroll, composite, market_name):
+        """Background task: monitor position for SL/TP, then resolve."""
+        try:
+            wait_seconds = min(
+                max(0, market.seconds_remaining + 10),
+                MAX_RESOLUTION_WAIT,
             )
-            pnl = new_bankroll - bankroll
-            outcome_label = early_exit
 
-            if early_exit == "stop_loss":
-                loss_pct = abs(pnl) / result.filled_size * 100 if result.filled_size > 0 else 0
-                await self._broadcast_round(
-                    "stop_loss",
-                    f"Stop-loss: vendido a {exit_result['exit_price'] * 100:.0f}¢ (-{loss_pct:.0f}%)",
-                    signal=composite,
-                    market_name=market_name,
-                )
-            else:
-                gain_pct = pnl / result.filled_size * 100 if result.filled_size > 0 else 0
-                await self._broadcast_round(
-                    "take_profit",
-                    f"Take-profit: vendido a {exit_result['exit_price'] * 100:.0f}¢ (+{gain_pct:.0f}%)",
-                    signal=composite,
-                    market_name=market_name,
-                )
-        else:
-            # Normal resolution
-            won = await self._check_resolution_with_retry(market, side)
-            if won is None:
-                # Could not determine outcome — leave trade PENDING for next startup recovery
-                logger.warning("Trade %d: resolution unknown, leaving PENDING", result.trade_id)
-                await state.set("has_open_position", False)
-                await state.set("current_exposure", 0.0)
-                await self._broadcast_round(
-                    "skip",
-                    "Resolución no disponible, trade queda PENDING",
-                    signal=composite,
-                    market_name=market_name,
-                )
-                return
-            new_bankroll = await resolve_trade(result.trade_id, won, bankroll)
-            pnl = new_bankroll - bankroll
-            outcome_label = "win" if won else "loss"
+            stop_loss_pct = get("stop_loss_pct", 0.08)
+            take_profit_pct = get("take_profit_pct", 0.12)
+            stop_price = result.filled_price * (1 - stop_loss_pct)
+            take_profit_price = result.filled_price * (1 + take_profit_pct)
+            early_exit = None
+            exit_proceeds = None
+            exit_failed = False
 
-        # Auto-redeem winning tokens on-chain
-        if outcome_label == "win" and not get("dry_run", True):
-            index_set = 1 if side == "up" else 2
-            try:
-                from bot.wallet import redeem_positions
-                r = await redeem_positions(market.condition_id, [index_set])
-                if r.success:
-                    logger.info("Auto-redeemed: tx=%s", r.tx_hash)
-                    # Sync balance right after successful redeem so bankroll matches reality
-                    await self._sync_balance()
+            logger.info(
+                "Monitoring %.0fs | entry=%.2f¢ stop=%.2f¢ (-%d%%) tp=%.2f¢ (+%d%%)",
+                wait_seconds, result.filled_price * 100, stop_price * 100,
+                int(stop_loss_pct * 100), take_profit_price * 100,
+                int(take_profit_pct * 100),
+            )
+
+            elapsed = 0
+            while elapsed < wait_seconds:
+                await asyncio.sleep(5)
+                elapsed += 5
+
+                await self.polymarket_ws.subscribe(token_id)
+                await asyncio.sleep(1)
+                elapsed += 1
+
+                bid = self.polymarket_ws.orderbook.best_bid
+
+                if bid is not None and self.on_trade:
+                    unrealized_pnl = (bid - result.filled_price) * result.shares
+                    unrealized_pct = ((bid / result.filled_price) - 1) * 100 if result.filled_price > 0 else 0
+                    await self.on_trade({
+                        "event_type": "position_update",
+                        "trade_id": result.trade_id,
+                        "current_bid": bid,
+                        "entry_price": result.filled_price,
+                        "unrealized_pnl": round(unrealized_pnl, 2),
+                        "unrealized_pct": round(unrealized_pct, 1),
+                        "elapsed": elapsed,
+                        "wait_seconds": wait_seconds,
+                    })
+
+                if exit_failed or not get("use_tp_sl", True):
+                    continue
+
+                if bid is not None:
+                    logger.debug(
+                        "Monitor: bid=%.2f¢ stop=%.2f¢ tp=%.2f¢",
+                        bid * 100, stop_price * 100, take_profit_price * 100,
+                    )
+                    if bid <= stop_price:
+                        logger.warning(
+                            "STOP-LOSS triggered: bid=%.2f¢ <= stop=%.2f¢",
+                            bid * 100, stop_price * 100,
+                        )
+                        exit_result = await exit_position(token_id, result.shares, bid)
+                        if exit_result["success"]:
+                            early_exit = "stop_loss"
+                            exit_proceeds = exit_result["proceeds"]
+                            break
+                        else:
+                            logger.warning("SL exit failed, holding to resolution")
+                            exit_failed = True
+                    elif bid >= take_profit_price:
+                        logger.info(
+                            "TAKE-PROFIT triggered: bid=%.2f¢ >= tp=%.2f¢",
+                            bid * 100, take_profit_price * 100,
+                        )
+                        exit_result = await exit_position(token_id, result.shares, bid)
+                        if exit_result["success"]:
+                            early_exit = "take_profit"
+                            exit_proceeds = exit_result["proceeds"]
+                            break
+                        else:
+                            logger.warning("TP exit failed, holding to resolution")
+                            exit_failed = True
+
+            if early_exit:
+                new_bankroll = await resolve_trade(
+                    result.trade_id, won=False, bankroll=bankroll,
+                    exit_proceeds=exit_proceeds,
+                    exit_type=early_exit,
+                )
+                pnl = new_bankroll - bankroll
+                outcome_label = early_exit
+
+                if early_exit == "stop_loss":
+                    loss_pct = abs(pnl) / result.filled_size * 100 if result.filled_size > 0 else 0
+                    await self._broadcast_round(
+                        "stop_loss",
+                        f"Stop-loss: vendido a {exit_result['exit_price'] * 100:.0f}¢ (-{loss_pct:.0f}%)",
+                        signal=composite,
+                        market_name=market_name,
+                    )
                 else:
-                    logger.warning("Auto-redeem failed: %s — queued for retry", r.error)
+                    gain_pct = pnl / result.filled_size * 100 if result.filled_size > 0 else 0
+                    await self._broadcast_round(
+                        "take_profit",
+                        f"Take-profit: vendido a {exit_result['exit_price'] * 100:.0f}¢ (+{gain_pct:.0f}%)",
+                        signal=composite,
+                        market_name=market_name,
+                    )
+            else:
+                won = await self._check_resolution_with_retry(market, side)
+                if won is None:
+                    logger.warning("Trade %d: resolution unknown, leaving PENDING", result.trade_id)
+                    await state.set("has_open_position", False)
+                    await state.set("current_exposure", 0.0)
+                    await self._broadcast_round(
+                        "skip",
+                        "Resolución no disponible, trade queda PENDING",
+                        signal=composite,
+                        market_name=market_name,
+                    )
+                    return
+                new_bankroll = await resolve_trade(result.trade_id, won, bankroll)
+                pnl = new_bankroll - bankroll
+                outcome_label = "win" if won else "loss"
+
+            # Auto-redeem winning tokens on-chain
+            if outcome_label == "win" and not get("dry_run", True):
+                index_set = 1 if side == "up" else 2
+                try:
+                    from bot.wallet import redeem_positions
+                    r = await redeem_positions(market.condition_id, [index_set])
+                    if r.success:
+                        logger.info("Auto-redeemed: tx=%s", r.tx_hash)
+                        await self._sync_balance()
+                    else:
+                        logger.warning("Auto-redeem failed: %s — queued for retry", r.error)
+                        self._pending_redeems.append({
+                            "condition_id": market.condition_id,
+                            "index_set": index_set,
+                            "retries": 0,
+                        })
+                except Exception as e:
+                    logger.warning("Auto-redeem error: %s — queued for retry", e)
                     self._pending_redeems.append({
                         "condition_id": market.condition_id,
                         "index_set": index_set,
                         "retries": 0,
                     })
-            except Exception as e:
-                logger.warning("Auto-redeem error: %s — queued for retry", e)
-                self._pending_redeems.append({
-                    "condition_id": market.condition_id,
-                    "index_set": index_set,
-                    "retries": 0,
-                })
 
-        # Update risk state
-        won_for_stats = outcome_label in ("win", "take_profit")
-        await record_outcome(won_for_stats, pnl, new_bankroll)
-        await update_daily_stats(pnl, won_for_stats, new_bankroll)
+            # Update risk state
+            won_for_stats = outcome_label in ("win", "take_profit")
+            await record_outcome(won_for_stats, pnl, new_bankroll)
+            await update_daily_stats(pnl, won_for_stats, new_bankroll)
 
-        # Store RAG pattern for future k-NN queries (outcome, not side)
-        if self.pattern_store is not None:
-            try:
-                features = self._build_features()
-                if features is not None:
-                    rag_outcome = "win" if won_for_stats else "loss"
-                    await self.pattern_store.store(result.trade_id, features, rag_outcome)
-                    logger.info("Stored RAG pattern for trade %d (%s)", result.trade_id, rag_outcome)
-            except Exception as e:
-                logger.warning("Failed to store RAG pattern: %s", e)
+            # Store RAG pattern
+            if self.pattern_store is not None:
+                try:
+                    features = self._build_features()
+                    if features is not None:
+                        rag_outcome = "win" if won_for_stats else "loss"
+                        await self.pattern_store.store(result.trade_id, features, rag_outcome)
+                        logger.info("Stored RAG pattern for trade %d (%s)", result.trade_id, rag_outcome)
+                except Exception as e:
+                    logger.warning("Failed to store RAG pattern: %s", e)
 
-        # Notify dashboard
-        resolve_data = {
-            "trade_id": result.trade_id,
-            "outcome": outcome_label,
-            "pnl": pnl,
-            "bankroll": new_bankroll,
-        }
-        if self.on_trade:
-            await self.on_trade(resolve_data)
+            # Notify dashboard
+            resolve_data = {
+                "trade_id": result.trade_id,
+                "outcome": outcome_label,
+                "pnl": pnl,
+                "bankroll": new_bankroll,
+            }
+            if self.on_trade:
+                await self.on_trade(resolve_data)
 
-        logger.info(
-            "Round %d complete: %s pnl=$%.2f bankroll=$%.2f",
-            self._round,
-            outcome_label.upper(),
-            pnl,
-            new_bankroll,
-        )
+            logger.info(
+                "Resolved: %s pnl=$%.2f bankroll=$%.2f",
+                outcome_label.upper(), pnl, new_bankroll,
+            )
+
+        except Exception as e:
+            logger.error("Background resolution error for trade %d: %s", result.trade_id, e, exc_info=True)
+            await state.set("has_open_position", False)
+            await state.set("current_exposure", 0.0)
 
     def _build_features(self) -> np.ndarray | None:
         """Build 8-float feature vector from current price buffer state.
