@@ -41,7 +41,6 @@ async def main():
     from bot.state import state
     from web.app import create_app
     from web.ws_handler import WebSocketManager
-    from rag.sentiment import SentimentFetcher
     from rag.pattern_store import PatternStore
     from notifications.telegram import TelegramNotifier
 
@@ -96,30 +95,6 @@ async def main():
     engine.on_status = on_status
     engine.on_round_update = on_round_update
 
-    # Sentiment fetcher (background, every 30 min)
-    sentiment = SentimentFetcher()
-
-    async def sentiment_loop():
-        while True:
-            try:
-                score = await sentiment.fetch()
-                engine.sentiment_signal = score
-                logging.info("Sentiment updated: %.3f", score)
-            except Exception as e:
-                logging.error("Sentiment error: %s", e)
-            await asyncio.sleep(1800)  # 30 min
-
-    # RAG pattern query (background, every 25s)
-    async def rag_loop():
-        while True:
-            try:
-                features = engine._build_features()
-                if features is not None:
-                    engine.rag_signal = pattern_store.query(features)
-            except Exception as e:
-                logging.error("RAG loop error: %s", e)
-            await asyncio.sleep(25)
-
     # Create FastAPI app
     app = create_app(engine, ws_manager)
 
@@ -136,8 +111,6 @@ async def main():
 
     tasks = [
         asyncio.create_task(engine.start()),
-        asyncio.create_task(sentiment_loop()),
-        asyncio.create_task(rag_loop()),
     ]
 
     # Run uvicorn in the same event loop

@@ -65,13 +65,18 @@ def kelly_size(
     drawdown_mult = _drawdown_multiplier(daily_pnl, bankroll)
     size_usd *= drawdown_mult
 
+    # Cap: respect max_trade_pct from config
+    size_usd = min(size_usd, bankroll * max_trade_pct)
+
     # Floor: Polymarket FOK minimum is $1 USD
     min_trade = get("min_trade_usd", 1.0)
     if size_usd < min_trade:
-        size_usd = min_trade
-
-    # Cap: respect max_trade_pct from config
-    size_usd = min(size_usd, bankroll * max_trade_pct)
+        # If bankroll can afford the minimum, use it; otherwise skip
+        if bankroll * max_trade_pct >= min_trade:
+            size_usd = min_trade
+        else:
+            no_trade["reason"] = f"Size ${size_usd:.2f} below Polymarket min ${min_trade:.2f}"
+            return no_trade
 
     # Calculate shares
     shares = size_usd / entry_price

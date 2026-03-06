@@ -1,17 +1,29 @@
-// Polybot Admin — v2
+// Polybot Mission Control — v3
 
 const API = '';
+let adminTradeMode = 'all';
 
+// All config fields
 const FIELDS = [
-    'max_trade_pct', 'min_trade_usd', 'max_exposure_usd', 'daily_loss_limit_pct',
+    'max_trade_pct', 'base_trade_pct', 'min_trade_usd', 'max_exposure_usd',
+    'daily_loss_limit_pct', 'daily_profit_target_pct',
     'trade_threshold', 'max_spread_cents', 'min_time_remaining_sec',
     'max_consecutive_losses', 'cooldown_rounds', 'kelly_fraction',
-    'min_entry_price', 'max_entry_price', 'dry_run'
+    'min_entry_price', 'max_entry_price', 'stop_loss_pct', 'take_profit_pct',
+    'trade_cooldown_seconds', 'min_win_rate', 'circuit_breaker_window',
+    'circuit_breaker_hours', 'min_drawdown_multiplier', 'bankroll_floor_usd',
+    'min_estimated_winrate', 'max_estimated_winrate',
+    'dry_run', 'use_tp_sl', 'rag_enabled', 'invert_up_signal',
+    'telegram_enabled', 'bot_enabled', 'binance_symbol',
 ];
 
-const WEIGHTS = ['momentum', 'book_skew', 'fair_value', 'vol_regime', 'rag_pattern', 'sentiment'];
+const BOOL_FIELDS = ['dry_run', 'use_tp_sl', 'rag_enabled', 'invert_up_signal', 'telegram_enabled', 'bot_enabled'];
+const INT_FIELDS = ['max_consecutive_losses', 'cooldown_rounds', 'max_spread_cents', 'min_time_remaining_sec',
+    'trade_cooldown_seconds', 'circuit_breaker_window', 'circuit_breaker_hours', 'bankroll_floor_usd'];
+const TEXT_FIELDS = ['binance_symbol'];
+const WEIGHTS = ['momentum', 'book_skew', 'rsi'];
 
-// --- Auth fetch ---
+// --- Auth ---
 async function authFetch(url, opts = {}) {
     const res = await fetch(url, opts);
     if (res.status === 401) {
@@ -24,12 +36,19 @@ async function authFetch(url, opts = {}) {
 // --- Init ---
 document.addEventListener('DOMContentLoaded', () => {
     loadConfig();
+    loadStatus();
+    loadTrades();
     loadStats();
     loadKeysStatus();
-    loadBotStatus();
     loadWalletBalances();
+    loadRagCount();
 
-    // Wire up weight sliders
+    // Auto-refresh
+    setInterval(loadStatus, 5000);
+    setInterval(loadTrades, 15000);
+    setInterval(loadStats, 30000);
+
+    // Weight sliders
     for (const w of WEIGHTS) {
         const slider = document.getElementById(`w_${w}`);
         const val = document.getElementById(`wv_${w}`);
@@ -40,74 +59,289 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
     }
+
+    // Trade mode filter
+    document.getElementById('adminModeFilters').addEventListener('click', (e) => {
+        const btn = e.target.closest('.chart-filter-btn');
+        if (!btn) return;
+        document.querySelectorAll('#adminModeFilters .chart-filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        adminTradeMode = btn.dataset.mode;
+        loadTrades();
+    });
 });
 
-// --- Bot Status ---
-async function loadBotStatus() {
+// =====================
+// LIVE STATUS
+// =====================
+async function loadStatus() {
     try {
         const res = await fetch(`${API}/api/status`);
-        const data = await res.json();
-        const badge = document.getElementById('statusBadge');
-        const text = document.getElementById('statusText');
-        if (data.running) {
-            badge.className = 'status-badge running';
-            const mode = data.dry_run ? 'DRY RUN' : 'LIVE';
-            text.textContent = `RUNNING \u00b7 ${mode}`;
-        } else {
-            badge.className = 'status-badge stopped';
-            text.textContent = 'STOPPED';
-        }
+        const d = await res.json();
+        updateStatusHero(d);
+        updateSignals(d.signals);
+        updateRisk(d);
     } catch (e) {
-        // silently fail
+        console.error('Status failed:', e);
     }
 }
 
-// --- Collapsible sections ---
-function toggleSection(header) {
-    const body = header.nextElementSibling;
-    const isOpen = header.classList.contains('open');
-
-    if (isOpen) {
-        header.classList.remove('open');
-        body.classList.remove('open');
+function updateStatusHero(d) {
+    // Badge
+    const badge = document.getElementById('statusBadge');
+    const text = document.getElementById('statusText');
+    if (d.running) {
+        badge.className = 'status-badge running';
+        const mode = d.dry_run ? 'DRY RUN' : 'LIVE';
+        text.textContent = `RUNNING \u00b7 ${mode}`;
     } else {
-        header.classList.add('open');
-        body.classList.add('open');
+        badge.className = 'status-badge stopped';
+        text.textContent = 'STOPPED';
+    }
+
+    // Mode badge
+    const modeBadge = document.getElementById('mcModeBadge');
+    if (d.dry_run) {
+        modeBadge.textContent = 'PAPER MODE';
+        modeBadge.style.background = 'var(--surface-3)';
+        modeBadge.style.color = 'var(--text-dim)';
+    } else {
+        modeBadge.textContent = 'LIVE TRADING';
+        modeBadge.style.background = 'var(--green-bg)';
+        modeBadge.style.color = 'var(--green)';
+    }
+
+    // Hero cards
+    const bankroll = d.bankroll || 0;
+    const initialDeposit = d.initial_deposit || bankroll;
+    const walletBal = d.wallet_balance;
+    const bankrollOpen = d.bankroll_open || initialDeposit;
+
+    // Card 1: Wallet Real (on-chain balance)
+    const walletEl = document.getElementById('mcWallet');
+    if (walletBal != null) {
+        walletEl.textContent = `$${walletBal.toFixed(2)}`;
+    } else {
+        walletEl.textContent = `$${bankroll.toFixed(2)}`;
+    }
+    document.getElementById('mcDeposit').textContent = `Invertido: $${initialDeposit.toFixed(2)}`;
+
+    // Card 2: Today P&L
+    const pnl = d.daily_pnl || 0;
+    const pnlEl = document.getElementById('mcDailyPnl');
+    pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+    pnlEl.className = `card-value ${pnl >= 0 ? 'positive' : 'negative'}`;
+    document.getElementById('mcDailyPct').textContent = bankrollOpen > 0
+        ? `${pnl >= 0 ? '+' : ''}${(pnl / bankrollOpen * 100).toFixed(1)}% · Open: $${bankrollOpen.toFixed(2)}`
+        : '';
+
+    // Fees transparency
+    const fees = d.daily_fees || 0;
+    const feesEl = document.getElementById('mcDailyFees');
+    if (feesEl && fees > 0) {
+        const gross = pnl + fees;
+        feesEl.textContent = `Bruto: +$${gross.toFixed(2)} · Fees: -$${fees.toFixed(2)}`;
+    }
+
+    // Card 3: Net Profit (wallet - initial deposit)
+    const realBal = walletBal != null ? walletBal : bankroll;
+    const netProfit = realBal - initialDeposit;
+    const netEl = document.getElementById('mcNetProfit');
+    netEl.textContent = `${netProfit >= 0 ? '+' : ''}$${netProfit.toFixed(2)}`;
+    netEl.className = `card-value ${netProfit >= 0 ? 'positive' : 'negative'}`;
+    const roi = initialDeposit > 0 ? (netProfit / initialDeposit * 100) : 0;
+    document.getElementById('mcNetProfitSub').textContent = `ROI: ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}% · R${d.round || 0}`;
+
+    // BTC price
+    if (d.current_price) {
+        document.getElementById('mcBtcPrice').textContent = `$${Number(d.current_price).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
     }
 }
 
-// --- Weight sum ---
-function updateWeightSum() {
-    let sum = 0;
-    for (const w of WEIGHTS) {
-        const slider = document.getElementById(`w_${w}`);
-        if (slider) sum += parseFloat(slider.value);
+// =====================
+// SIGNALS
+// =====================
+function updateSignals(sig) {
+    if (!sig) return;
+    updateSignalBar('Mom', sig.momentum);
+    updateSignalBar('Skew', sig.book_skew);
+    updateSignalBar('RSI', sig.rsi);
+    updateGauge(sig.composite);
+}
+
+function updateSignalBar(id, value) {
+    const fill = document.getElementById(`sig${id}`);
+    const val = document.getElementById(`sig${id}Val`);
+    if (!fill || !val) return;
+
+    if (value == null) {
+        val.textContent = '\u2014';
+        val.style.color = 'var(--text-dim)';
+        fill.style.width = '0';
+        return;
     }
 
-    const fill = document.getElementById('weightSumFill');
-    const label = document.getElementById('weightSumLabel');
+    val.textContent = value.toFixed(3);
+    val.style.color = value >= 0 ? 'var(--green)' : 'var(--red)';
+
+    const pct = Math.min(Math.abs(value) * 50, 50);
+    fill.style.width = `${pct}%`;
+
+    if (value >= 0) {
+        fill.className = 'signal-fill positive';
+        fill.style.left = '50%';
+        fill.style.right = 'auto';
+    } else {
+        fill.className = 'signal-fill negative';
+        fill.style.right = '50%';
+        fill.style.left = 'auto';
+    }
+}
+
+function updateGauge(value) {
+    const fill = document.getElementById('gaugeFill');
+    const label = document.getElementById('gaugeValue');
     if (!fill || !label) return;
 
-    const pct = Math.min(sum * 100, 100);
-    fill.style.width = pct + '%';
+    if (value == null) {
+        label.textContent = '\u2014';
+        label.style.color = 'var(--text-dim)';
+        fill.setAttribute('stroke-dashoffset', '314.16');
+        return;
+    }
 
-    const diff = Math.abs(sum - 1.0);
-    if (diff < 0.01) {
-        fill.className = 'weight-sum-fill';
-        label.className = 'weight-sum-label valid';
-        label.textContent = `Sum: ${sum.toFixed(2)} \u2714`;
-    } else if (sum > 1.0) {
-        fill.className = 'weight-sum-fill over';
-        label.className = 'weight-sum-label invalid';
-        label.textContent = `Sum: ${sum.toFixed(2)} (over!)`;
+    const circumference = 314.16;
+    const normalized = (value + 1) / 2;
+    const offset = circumference * (1 - normalized);
+    fill.setAttribute('stroke-dashoffset', offset.toFixed(2));
+
+    const color = value >= 0.1 ? 'var(--green)' : value <= -0.1 ? 'var(--red)' : 'var(--accent)';
+    fill.setAttribute('stroke', color);
+    label.textContent = value.toFixed(3);
+    label.style.color = color;
+}
+
+// =====================
+// RISK
+// =====================
+function updateRisk(d) {
+    const cl = d.consecutive_losses || 0;
+    const streakEl = document.getElementById('riskStreak');
+    streakEl.textContent = cl > 0 ? `${cl} losses` : '0';
+    streakEl.style.color = cl >= 3 ? 'var(--red)' : '';
+
+    const dailyLoss = Math.abs(Math.min(d.daily_pnl || 0, 0));
+    const bankroll = d.bankroll || 1;
+    const dailyLossLimit = bankroll * (d.daily_loss_limit_pct || 0.15);
+    document.getElementById('riskDailyLoss').textContent = dailyLoss > 0 ? `-$${dailyLoss.toFixed(2)}` : '$0.00';
+    if (dailyLossLimit > 0) {
+        const pct = Math.min((dailyLoss / dailyLossLimit) * 100, 100);
+        const bar = document.getElementById('riskDailyBar');
+        bar.style.width = pct + '%';
+        bar.className = 'progress-fill' + (pct > 80 ? ' danger' : pct > 50 ? ' warning' : '');
+    }
+
+    const ddEl = document.getElementById('riskDrawdown');
+    if (d.drawdown_multiplier != null) {
+        const mult = d.drawdown_multiplier;
+        ddEl.textContent = `${mult.toFixed(2)}x`;
+        ddEl.style.color = mult >= 0.9 ? 'var(--green)' : mult >= 0.5 ? 'var(--yellow)' : 'var(--red)';
+    }
+
+    const cdEl = document.getElementById('riskCooldown');
+    cdEl.textContent = d.cooldown_remaining > 0 ? `${d.cooldown_remaining} rounds` : 'No';
+    cdEl.style.color = d.cooldown_remaining > 0 ? 'var(--yellow)' : '';
+
+    const cbEl = document.getElementById('riskCircuit');
+    if (d.circuit_breaker) {
+        cbEl.textContent = 'TRIPPED';
+        cbEl.style.color = 'var(--red)';
     } else {
-        fill.className = 'weight-sum-fill under';
-        label.className = 'weight-sum-label invalid';
-        label.textContent = `Sum: ${sum.toFixed(2)} (under)`;
+        cbEl.textContent = 'OK';
+        cbEl.style.color = 'var(--green)';
+    }
+
+    const invertEl = document.getElementById('riskInvert');
+    if (invertEl) {
+        const on = d.invert_up_signal;
+        invertEl.textContent = on ? 'ON' : 'OFF';
+        invertEl.style.color = on ? 'var(--yellow)' : 'var(--text-dim)';
+    }
+
+    const tcdEl = document.getElementById('riskTradeCooldown');
+    if (tcdEl) {
+        const cd = d.trade_cooldown_seconds || 0;
+        tcdEl.textContent = cd > 0 ? `${cd}s` : 'Off';
+        tcdEl.style.color = cd > 0 ? 'var(--accent)' : 'var(--text-dim)';
     }
 }
 
-// --- Config ---
+// =====================
+// TRADES
+// =====================
+async function loadTrades() {
+    try {
+        const res = await fetch(`${API}/api/trades?limit=20&mode=${adminTradeMode}`);
+        const trades = await res.json();
+        renderTrades(trades);
+    } catch (e) {
+        console.error('Trades failed:', e);
+    }
+}
+
+function renderTrades(trades) {
+    const body = document.getElementById('adminTradesBody');
+    body.innerHTML = '';
+
+    // Update hero win rate from trades
+    const resolved = trades.filter(t => t.outcome);
+    const wins = resolved.filter(t => t.outcome === 'win' || t.outcome === 'take_profit').length;
+    const total = resolved.length;
+
+    const wrEl = document.getElementById('mcWinRate');
+    const wrSub = document.getElementById('mcWinRateSub');
+    if (total > 0) {
+        wrEl.textContent = `${(wins / total * 100).toFixed(1)}%`;
+        wrSub.textContent = `${wins}W / ${total - wins}L`;
+    }
+
+    for (const t of trades) {
+        const tr = document.createElement('tr');
+        const time = t.timestamp
+            ? new Date(t.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+            : '';
+
+        const sideClass = t.side === 'up' ? 'side-up' : 'side-down';
+        const sideLabel = t.side === 'up' ? 'UP \u25b2' : 'DOWN \u25bc';
+        const modeBadge = t.dry_run ? '<span class="badge badge-paper">PAPER</span>' : '<span class="badge badge-live-tag">LIVE</span>';
+
+        let resultHtml;
+        if (t.outcome === 'win' || t.outcome === 'take_profit') {
+            resultHtml = `<span class="badge badge-win">+$${(t.pnl || 0).toFixed(2)}</span>`;
+        } else if (t.outcome === 'loss' || t.outcome === 'stop_loss') {
+            resultHtml = `<span class="badge badge-loss">-$${Math.abs(t.pnl || 0).toFixed(2)}</span>`;
+        } else {
+            resultHtml = `<span class="badge badge-pending">PENDING</span>`;
+        }
+
+        const btcLabel = t.btc_price ? `$${Number(t.btc_price).toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '\u2014';
+
+        tr.innerHTML = `
+            <td>${time}</td>
+            <td>${(t.signal_score || 0).toFixed(2)}</td>
+            <td class="${sideClass}">${sideLabel} ${modeBadge}</td>
+            <td>$${(t.size_usd || 0).toFixed(2)}</td>
+            <td>${(t.entry_price || 0).toFixed(2)}\u00a2</td>
+            <td>${btcLabel}</td>
+            <td>${resultHtml}</td>
+        `;
+        body.appendChild(tr);
+    }
+}
+
+// =====================
+// CONFIG
+// =====================
 async function loadConfig() {
     try {
         const res = await authFetch(`${API}/api/config`);
@@ -133,10 +367,9 @@ async function loadConfig() {
                 }
             }
         }
-
         updateWeightSum();
     } catch (e) {
-        console.error('Failed to load config:', e);
+        console.error('Config load failed:', e);
     }
 }
 
@@ -145,9 +378,11 @@ async function saveConfig() {
     for (const f of FIELDS) {
         const el = document.getElementById(f);
         if (!el) continue;
-        if (f === 'dry_run') {
+        if (BOOL_FIELDS.includes(f)) {
             cfg[f] = el.value === 'true';
-        } else if (['max_consecutive_losses', 'cooldown_rounds', 'max_spread_cents', 'min_time_remaining_sec'].includes(f)) {
+        } else if (TEXT_FIELDS.includes(f)) {
+            cfg[f] = el.value;
+        } else if (INT_FIELDS.includes(f)) {
             cfg[f] = parseInt(el.value);
         } else {
             cfg[f] = parseFloat(el.value);
@@ -175,17 +410,48 @@ async function saveConfig() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cfg),
         });
-        if (res.ok) {
-            showToast('Config saved', 'success');
-        } else {
-            showToast('Failed to save', 'error');
-        }
+        if (res.ok) showToast('Config saved', 'success');
+        else showToast('Failed to save', 'error');
     } catch (e) {
         showToast('Network error', 'error');
     }
 }
 
-// --- Stats ---
+// =====================
+// WEIGHT SUM
+// =====================
+function updateWeightSum() {
+    let sum = 0;
+    for (const w of WEIGHTS) {
+        const slider = document.getElementById(`w_${w}`);
+        if (slider) sum += parseFloat(slider.value);
+    }
+
+    const fill = document.getElementById('weightSumFill');
+    const label = document.getElementById('weightSumLabel');
+    if (!fill || !label) return;
+
+    fill.style.width = Math.min(sum * 100, 100) + '%';
+
+    const diff = Math.abs(sum - 1.0);
+    if (diff < 0.01) {
+        fill.className = 'weight-sum-fill';
+        label.className = 'weight-sum-label valid';
+        label.textContent = `Sum: ${sum.toFixed(2)} \u2714`;
+    } else if (sum > 1.0) {
+        fill.className = 'weight-sum-fill over';
+        label.className = 'weight-sum-label invalid';
+        label.textContent = `Sum: ${sum.toFixed(2)} (over!)`;
+    } else {
+        fill.className = 'weight-sum-fill under';
+        label.className = 'weight-sum-label invalid';
+        label.textContent = `Sum: ${sum.toFixed(2)} (under)`;
+    }
+}
+
+// =====================
+// STATS
+// =====================
 async function loadStats() {
     try {
         const res = await fetch(`${API}/api/stats/summary`);
@@ -198,18 +464,31 @@ async function loadStats() {
         pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
         pnlEl.className = `card-value ${pnl >= 0 ? 'positive' : 'negative'}`;
     } catch (e) {
-        console.error('Failed to load stats:', e);
+        console.error('Stats failed:', e);
     }
 }
 
-// --- Bot Control ---
+// =====================
+// SETTINGS TABS
+// =====================
+function switchTab(btn) {
+    const tabId = btn.dataset.tab;
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(tabId).classList.add('active');
+}
+
+// =====================
+// BOT CONTROL
+// =====================
 async function startBot() {
     try {
         await authFetch(`${API}/api/bot/start`, { method: 'POST' });
         showToast('Bot started', 'success');
-        setTimeout(loadBotStatus, 1000);
+        setTimeout(loadStatus, 1000);
     } catch (e) {
-        showToast('Failed to start bot', 'error');
+        showToast('Failed to start', 'error');
     }
 }
 
@@ -217,9 +496,9 @@ async function stopBot() {
     try {
         await authFetch(`${API}/api/bot/stop`, { method: 'POST' });
         showToast('Bot stopped', 'success');
-        setTimeout(loadBotStatus, 1000);
+        setTimeout(loadStatus, 1000);
     } catch (e) {
-        showToast('Failed to stop bot', 'error');
+        showToast('Failed to stop', 'error');
     }
 }
 
@@ -228,7 +507,9 @@ async function logout() {
     location.href = '/login';
 }
 
-// --- API Keys ---
+// =====================
+// API KEYS
+// =====================
 async function loadKeysStatus() {
     try {
         const res = await authFetch(`${API}/api/keys/status`);
@@ -236,18 +517,14 @@ async function loadKeysStatus() {
         const el = document.getElementById('credsStatus');
         if (data.has_creds) {
             let msg = '\u2705 API keys configured';
-            if (data.balance != null) {
-                msg += ` \u2014 Wallet: $${data.balance.toFixed(2)} USDC`;
-            }
+            if (data.balance != null) msg += ` \u2014 Wallet: $${data.balance.toFixed(2)} USDC`;
             el.textContent = msg;
             el.style.color = 'var(--green)';
         } else {
-            el.textContent = '\u26a0 No API keys \u2014 running in dry run mode';
+            el.textContent = '\u26a0 No API keys \u2014 dry run only';
             el.style.color = 'var(--yellow)';
         }
-    } catch (e) {
-        console.error('Keys status failed:', e);
-    }
+    } catch (e) { /* ignore */ }
 }
 
 async function saveKeys() {
@@ -257,36 +534,23 @@ async function saveKeys() {
         POLYMARKET_API_SECRET: document.getElementById('api_secret').value,
         POLYMARKET_API_PASSPHRASE: document.getElementById('api_passphrase').value,
     };
-    for (const k of Object.keys(data)) {
-        if (!data[k]) delete data[k];
-    }
-    if (Object.keys(data).length === 0) {
-        showToast('Fill in at least one field', 'error');
-        return;
-    }
+    for (const k of Object.keys(data)) { if (!data[k]) delete data[k]; }
+    if (!Object.keys(data).length) { showToast('Fill in at least one field', 'error'); return; }
+
     try {
         const res = await authFetch(`${API}/api/keys/save`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data),
         });
-        if (res.ok) {
-            showToast('API keys saved \u2014 restart bot to apply', 'success');
-            loadKeysStatus();
-        } else {
-            showToast('Failed to save keys', 'error');
-        }
-    } catch (e) {
-        showToast('Network error', 'error');
-    }
+        if (res.ok) { showToast('API keys saved', 'success'); loadKeysStatus(); }
+        else showToast('Failed to save keys', 'error');
+    } catch (e) { showToast('Network error', 'error'); }
 }
 
 async function deriveKeys() {
     const pk = document.getElementById('pk').value;
-    if (!pk) {
-        showToast('Enter private key first', 'error');
-        return;
-    }
+    if (!pk) { showToast('Enter private key first', 'error'); return; }
     showToast('Deriving keys...', 'info');
     try {
         const res = await authFetch(`${API}/api/keys/derive`, {
@@ -304,37 +568,28 @@ async function deriveKeys() {
             const err = await res.json();
             showToast(`Error: ${err.detail}`, 'error');
         }
-    } catch (e) {
-        showToast('Derivation failed', 'error');
-    }
+    } catch (e) { showToast('Derivation failed', 'error'); }
 }
 
 async function checkBalance() {
     try {
         const res = await authFetch(`${API}/api/keys/status`);
         const data = await res.json();
-        if (!data.has_creds) {
-            showToast('Save API keys first', 'error');
-            return;
-        }
-        if (data.balance != null) {
-            showToast(`Wallet: $${data.balance.toFixed(2)} USDC`, 'success');
-        } else {
-            showToast('Could not fetch balance', 'error');
-        }
-    } catch (e) {
-        showToast('Balance check failed', 'error');
-    }
+        if (!data.has_creds) { showToast('Save API keys first', 'error'); return; }
+        if (data.balance != null) showToast(`Wallet: $${data.balance.toFixed(2)} USDC`, 'success');
+        else showToast('Could not fetch balance', 'error');
+    } catch (e) { showToast('Balance check failed', 'error'); }
 }
 
+// =====================
+// TELEGRAM
+// =====================
 async function saveTelegram() {
     const data = {
         TELEGRAM_TOKEN: document.getElementById('tg_token').value,
         TELEGRAM_CHAT_ID: document.getElementById('tg_chat_id').value,
     };
-    for (const k of Object.keys(data)) {
-        if (!data[k]) delete data[k];
-    }
+    for (const k of Object.keys(data)) { if (!data[k]) delete data[k]; }
     try {
         const res = await authFetch(`${API}/api/keys/telegram`, {
             method: 'POST',
@@ -343,17 +598,16 @@ async function saveTelegram() {
         });
         if (res.ok) showToast('Telegram config saved', 'success');
         else showToast('Failed to save', 'error');
-    } catch (e) {
-        showToast('Network error', 'error');
-    }
+    } catch (e) { showToast('Network error', 'error'); }
 }
 
-// --- Wallet Management ---
+// =====================
+// WALLET
+// =====================
 async function loadWalletBalances() {
     try {
         const res = await authFetch(`${API}/api/wallet/balances`);
         const d = await res.json();
-
         const fmt = (v) => v != null ? `$${v.toFixed(2)}` : '\u2014';
 
         document.getElementById('walletExchange').textContent = fmt(d.exchange_usdc);
@@ -379,14 +633,11 @@ async function loadWalletBalances() {
             maticEl.textContent = `Gas: ${d.matic.toFixed(4)} POL`;
             maticEl.style.color = d.matic < 0.1 ? 'var(--red)' : 'var(--text-dim)';
         }
-    } catch (e) {
-        console.error('Wallet balances failed:', e);
-    }
+    } catch (e) { console.error('Wallet failed:', e); }
 }
 
 async function redeemAll() {
     if (!confirm('Redeem all winning tokens for USDC.e?')) return;
-
     const statusEl = document.getElementById('redeemStatus');
     statusEl.textContent = 'Redeeming...';
     statusEl.style.color = 'var(--accent)';
@@ -394,17 +645,15 @@ async function redeemAll() {
     try {
         const res = await authFetch(`${API}/api/wallet/redeem-all`, { method: 'POST' });
         const d = await res.json();
-
         if (d.redeemed === 0 && d.total === 0) {
             showToast('No tokens to redeem', 'info');
-            statusEl.textContent = 'No unredeemed tokens found.';
+            statusEl.textContent = 'No unredeemed tokens.';
         } else {
-            showToast(`Redeemed ${d.redeemed}/${d.total} positions`, d.redeemed > 0 ? 'success' : 'error');
+            showToast(`Redeemed ${d.redeemed}/${d.total}`, d.redeemed > 0 ? 'success' : 'error');
             const lines = d.results.map(r =>
                 `${r.condition_id} ${r.side}: ${r.success ? '\u2713' : '\u2717 ' + r.error}`
             );
             statusEl.innerHTML = lines.join('<br>');
-            statusEl.style.color = 'var(--text-dim)';
         }
         loadWalletBalances();
     } catch (e) {
@@ -417,15 +666,8 @@ async function redeemAll() {
 async function sendUsdc() {
     const address = document.getElementById('sendAddress').value.trim();
     const amount = parseFloat(document.getElementById('sendAmount').value);
-
-    if (!address || !address.startsWith('0x')) {
-        showToast('Enter a valid address', 'error');
-        return;
-    }
-    if (!amount || amount <= 0) {
-        showToast('Enter a valid amount', 'error');
-        return;
-    }
+    if (!address || !address.startsWith('0x')) { showToast('Enter valid address', 'error'); return; }
+    if (!amount || amount <= 0) { showToast('Enter valid amount', 'error'); return; }
     if (!confirm(`Send $${amount.toFixed(2)} USDC.e to ${address.slice(0, 10)}...?`)) return;
 
     try {
@@ -443,25 +685,16 @@ async function sendUsdc() {
             const err = await res.json();
             showToast(`Send failed: ${err.detail}`, 'error');
         }
-    } catch (e) {
-        showToast('Send failed: network error', 'error');
-    }
+    } catch (e) { showToast('Send failed', 'error'); }
 }
 
 async function swapUsdt() {
     const usdtEl = document.getElementById('walletUsdt');
-    const usdtText = usdtEl ? usdtEl.textContent : '';
-    const usdtVal = parseFloat(usdtText.replace('$', '')) || 0;
+    const usdtVal = parseFloat((usdtEl?.textContent || '').replace('$', '')) || 0;
+    if (usdtVal < 0.01) { showToast('No USDT balance', 'error'); return; }
+    if (!confirm(`Swap $${usdtVal.toFixed(2)} USDT to USDC.e?`)) return;
 
-    if (usdtVal < 0.01) {
-        showToast('No USDT balance to swap', 'error');
-        return;
-    }
-
-    if (!confirm(`Swap $${usdtVal.toFixed(2)} USDT to USDC.e via Uniswap V3?`)) return;
-
-    showToast('Swapping USDT \u2192 USDC.e...', 'info');
-
+    showToast('Swapping...', 'info');
     try {
         const res = await authFetch(`${API}/api/wallet/swap-usdt`, {
             method: 'POST',
@@ -470,32 +703,46 @@ async function swapUsdt() {
         });
         if (res.ok) {
             const d = await res.json();
-            const newBal = d.details?.usdc_balance;
-            const msg = newBal != null
-                ? `Swapped! New USDC.e: $${newBal.toFixed(2)} \u2014 tx: ${d.tx_hash.slice(0, 12)}...`
-                : `Swap OK \u2014 tx: ${d.tx_hash.slice(0, 12)}...`;
-            showToast(msg, 'success');
+            showToast(`Swap OK \u2014 tx: ${d.tx_hash.slice(0, 12)}...`, 'success');
             loadWalletBalances();
         } else {
             const err = await res.json();
             showToast(`Swap failed: ${err.detail}`, 'error');
         }
-    } catch (e) {
-        showToast('Swap failed: network error', 'error');
-    }
+    } catch (e) { showToast('Swap failed', 'error'); }
 }
 
-// --- Toast ---
+// =====================
+// RAG
+// =====================
+async function loadRagCount() {
+    try {
+        const res = await fetch(`${API}/api/rag/patterns?limit=10000`);
+        const data = await res.json();
+        const el = document.getElementById('ragPatternCount');
+        if (el) el.textContent = data.length;
+    } catch (e) { /* ignore */ }
+}
+
+async function purgeRag() {
+    if (!confirm('Delete ALL RAG patterns? Cannot be undone.')) return;
+    try {
+        const res = await authFetch(`${API}/api/rag/purge`, { method: 'POST' });
+        if (res.ok) { showToast('RAG patterns purged', 'success'); loadRagCount(); }
+        else showToast('Purge failed', 'error');
+    } catch (e) { showToast('Purge failed', 'error'); }
+}
+
+// =====================
+// TOAST
+// =====================
 function showToast(msg, type) {
     const container = document.getElementById('toastContainer') || document.body;
     const toast = document.createElement('div');
     toast.className = `toast ${type || 'info'}`;
-
     const icon = type === 'success' ? '\u2713' : type === 'error' ? '\u2717' : '\u2139';
     toast.innerHTML = `<span>${icon}</span> ${msg}`;
-
     container.appendChild(toast);
-
     setTimeout(() => {
         toast.classList.add('toast-exit');
         toast.addEventListener('animationend', () => toast.remove());

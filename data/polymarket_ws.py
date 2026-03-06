@@ -200,6 +200,8 @@ class PolymarketWS:
                     self._update_side(self.orderbook.bids, price, size, reverse=True)
                 elif side == "sell":
                     self._update_side(self.orderbook.asks, price, size, reverse=False)
+            # Delta received = book is alive
+            self.orderbook.timestamp = time.time()
 
     @staticmethod
     def _update_side(

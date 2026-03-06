@@ -35,12 +35,12 @@ async def check_risk(signal_score: float, bankroll: float) -> RiskCheck:
     if abs(signal_score) < threshold:
         return RiskCheck(False, f"Signal {signal_score:.3f} below threshold {threshold}")
 
-    # 3. Bankroll floor (emergency stop)
+    # 4. Bankroll floor (emergency stop)
     bankroll_floor = get("bankroll_floor_usd", 5.0)
     if bankroll < bankroll_floor:
         return RiskCheck(False, f"Bankroll ${bankroll:.2f} below floor ${bankroll_floor:.2f}")
 
-    # 4. Consecutive losses → cooldown
+    # 5. Consecutive losses → cooldown
     consec_losses = await state.get("consecutive_losses", 0)
     max_consec = get("max_consecutive_losses", 3)
     if consec_losses >= max_consec:
@@ -51,28 +51,29 @@ async def check_risk(signal_score: float, bankroll: float) -> RiskCheck:
                 f"Cooldown: {cooldown_remaining} rounds remaining after {consec_losses} losses",
             )
 
-    # 5. Circuit breaker: win rate check
-    win_rate = await _recent_win_rate()
-    min_wr = get("min_win_rate", 0.45)
+    # 6. Circuit breaker: win rate check
+    min_wr = get("min_win_rate", None)
     window = get("circuit_breaker_window", 40)
-    if win_rate is not None and win_rate < min_wr:
-        return RiskCheck(
-            False,
-            f"Circuit breaker: win rate {win_rate:.1%} < {min_wr:.1%} (last {window})",
-        )
+    if min_wr:
+        win_rate = await _recent_win_rate()
+        if win_rate is not None and win_rate < min_wr:
+            return RiskCheck(
+                False,
+                f"Circuit breaker: win rate {win_rate:.1%} < {min_wr:.1%} (last {window})",
+            )
 
-    # 6. Max exposure check
+    # 7. Max exposure check
     max_exposure = get("max_exposure_usd", 15.0)
     current_exposure = await state.get("current_exposure", 0.0)
     if current_exposure >= max_exposure:
         return RiskCheck(False, f"Max exposure reached: ${current_exposure:.2f}")
 
-    # 7. Open position check
+    # 8. Open position check
     has_open = await state.get("has_open_position", False)
     if has_open:
         return RiskCheck(False, "Position already open, waiting for resolution")
 
-    # 8. Trade cooldown (time-based)
+    # 9. Trade cooldown (time-based)
     cooldown_secs = get("trade_cooldown_seconds", 0)
     if cooldown_secs > 0:
         last_trade_ts = await state.get("last_trade_timestamp", 0.0)
@@ -103,7 +104,7 @@ async def _recent_win_rate() -> float | None:
         rows = await cursor.fetchall()
         if len(rows) < window:
             return None
-        wins = sum(1 for r in rows if r["outcome"] == "win")
+        wins = sum(1 for r in rows if r["outcome"] in ("win", "take_profit"))
         return wins / len(rows)
     finally:
         await db.close()
@@ -147,6 +148,9 @@ async def decrement_cooldown():
 
 async def reset_daily():
     """Reset daily counters. Call at midnight UTC."""
+    bankroll = await state.get("bankroll", 0.0)
+    await state.set("bankroll_open", bankroll)
     await state.set("daily_pnl", 0.0)
+    await state.set("daily_fees", 0.0)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     await state.set("daily_reset_date", today)

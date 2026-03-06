@@ -5,7 +5,28 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
+from unittest.mock import patch
 from bot.sizing import kelly_size, _drawdown_multiplier
+
+
+# Fix config values so tests don't depend on config.yaml
+@pytest.fixture(autouse=True)
+def mock_sizing_config():
+    def fake_get(key, default=None):
+        overrides = {
+            "daily_loss_limit_pct": 0.15,
+            "min_drawdown_multiplier": 0.25,
+            "base_trade_pct": 0.05,
+            "max_trade_pct": 0.08,
+            "min_trade_usd": 1,
+            "max_exposure_usd": 5,
+            "kelly_fraction": 0.5,
+            "min_estimated_winrate": 0.55,
+            "max_estimated_winrate": 0.6,
+        }
+        return overrides.get(key, default)
+    with patch("bot.sizing.get", side_effect=fake_get):
+        yield
 
 
 class TestKellySize:

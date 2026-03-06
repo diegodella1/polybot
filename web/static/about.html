@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About Polybot</title>
+    <link rel="stylesheet" href="/static/style.css?v=6">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>POLYBOT</h1>
+        </div>
+        <div class="header-right">
+            <a href="/" class="header-link">Dashboard</a>
+        </div>
+    </header>
+    <div style="padding:4px 0;background:rgba(255,200,0,0.08);border-bottom:1px solid rgba(255,200,0,0.15);text-align:center;font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:0.3px">
+        EXPERIMENTAL &mdash; Not Financial Advice &middot; DYOR &middot; Use at your own risk
+    </div>
+
+    <div style="max-width:680px;margin:40px auto;padding:0 20px;font-family:var(--font-sans);color:var(--text-primary);line-height:1.7">
+
+        <h2 style="font-size:22px;font-weight:700;margin-bottom:24px;color:var(--text-primary)">About this experiment</h2>
+
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
+            Polybot is an experimental automated trading bot for
+            <a href="https://polymarket.com" target="_blank" style="color:var(--accent);text-decoration:none">Polymarket</a>'s
+            BTC Up/Down 5-minute binary markets. It was built as a learning project to explore algorithmic trading,
+            signal processing, and market microstructure in a live environment.
+        </p>
+
+        <h3 style="font-size:15px;font-weight:600;margin:28px 0 12px;color:var(--text-primary)">What it does</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            Every 10 seconds, the bot analyzes multiple data sources to decide whether to trade:
+        </p>
+        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
+            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">BTC Momentum</strong> &mdash; Real-time price action from Binance klines</li>
+            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Orderbook Skew</strong> &mdash; Buy/sell pressure imbalance on Polymarket</li>
+            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Fair Value</strong> &mdash; Mispricing detection between BTC movement and market odds</li>
+            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Pattern Matching (RAG)</strong> &mdash; k-NN similarity search over historical trade outcomes</li>
+            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Sentiment</strong> &mdash; News analysis via LLM (GPT-4o-mini)</li>
+        </ul>
+
+        <h3 style="font-size:15px;font-weight:600;margin:28px 0 12px;color:var(--text-primary)">Why it exists</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            This is not about making money. The bankroll is intentionally small (~$15 USDC) and the primary
+            goal is learning: how signals interact, how markets behave at the microstructure level, how to build
+            robust automated systems, and how to iterate on strategy through data.
+        </p>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            The bot is constantly evolving &mdash; signals get tuned, risk rules get adjusted, new components
+            get added. Every trade generates data that feeds back into the system (RAG patterns). It's a live
+            experiment in the truest sense.
+        </p>
+
+        <h3 style="font-size:15px;font-weight:600;margin:28px 0 12px;color:var(--text-primary)">How it's built</h3>
+        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
+            <li style="margin-bottom:8px">Python 3.11 + asyncio, FastAPI, SQLite</li>
+            <li style="margin-bottom:8px">Runs on a Raspberry Pi 5 as a systemd service</li>
+            <li style="margin-bottom:8px">Real-time data via Binance and Polymarket WebSockets</li>
+            <li style="margin-bottom:8px">On-chain execution via py-clob-client (Polygon)</li>
+            <li style="margin-bottom:8px">Dashboard you're looking at: vanilla HTML/JS, no framework</li>
+        </ul>
+
+        <div style="margin:40px 0 24px;padding:16px 20px;border:1px solid rgba(255,200,0,0.15);border-radius:8px;background:rgba(255,200,0,0.04);font-size:12px;color:var(--text-dim);line-height:1.6">
+            <strong style="color:var(--yellow)">Disclaimer</strong><br>
+            This is experimental software built for educational purposes. It is not financial advice (NFA).
+            Do your own research (DYOR). Trading prediction markets involves substantial risk of loss.
+            Past performance does not guarantee future results. The author assumes no responsibility
+            for any losses incurred. Use at your own risk.
+        </div>
+
+        <div style="text-align:center;margin-bottom:40px">
+            <a href="/" style="color:var(--accent);text-decoration:none;font-size:13px">&larr; Back to Dashboard</a>
+        </div>
+    </div>
+</body>
+</html>

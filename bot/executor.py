@@ -28,7 +28,17 @@ def has_polymarket_creds() -> bool:
 
 
 def fetch_wallet_balance() -> float | None:
-    """Fetch USDC balance from Polymarket wallet. Returns USD amount or None."""
+    """Fetch USDC.e balance. Prefers on-chain EOA balance, falls back to CLOB exchange."""
+    # Primary: on-chain EOA balance (source of truth)
+    try:
+        from bot.wallet import get_eoa_usdc_balance
+        balance = get_eoa_usdc_balance()
+        logger.info("EOA USDC.e balance: $%.2f", balance)
+        return balance
+    except Exception as e:
+        logger.warning("EOA balance check failed (%s), trying CLOB fallback", e)
+
+    # Fallback: CLOB exchange balance
     if not has_polymarket_creds():
         return None
     client = _get_client()
@@ -43,7 +53,7 @@ def fetch_wallet_balance() -> float | None:
             )
         )
         usdc = float(bal.get("balance", "0")) / 1e6
-        logger.info("Wallet USDC balance: $%.2f", usdc)
+        logger.info("CLOB USDC balance (fallback): $%.2f", usdc)
         return usdc
     except Exception as e:
         logger.error("Failed to fetch wallet balance: %s", e)
@@ -138,144 +148,331 @@ async def execute_trade(
             condition_id[:16],
         )
         order_id = f"dry_{int(datetime.now(timezone.utc).timestamp())}"
-    else:
-        # Real execution
-        client = _get_client()
-        if client is None:
-            return TradeResult(success=False, error="CLOB client not initialized")
 
+        # Record dry-run trade in DB
+        db = await get_db()
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import BUY
-
-            # Proportional slippage: ~3% of price to cross spread aggressively
-            slippage = max(0.02, round(entry_price * 0.03, 2))
-            entry_price = min(entry_price + slippage, 0.95)
-
-            # Round price to valid tick size
-            tick_size = client.get_tick_size(token_id)
-            if tick_size:
-                tick = float(tick_size)
-                entry_price = round(round(entry_price / tick) * tick, 4)
-
-            # Integer shares: guarantees maker_amount (shares*price) ≤ 2 decimals.
-            min_trade = get("min_trade_usd", 1.0)
-            shares = max(1, math.floor(size_usd / entry_price))
-            size_usd = round(shares * entry_price, 2)
-            if size_usd < min_trade:
-                shares = math.ceil(min_trade / entry_price)
-                size_usd = round(shares * entry_price, 2)
-
-            # Create signed order
-            signed_order = client.create_order(
-                order_args=OrderArgs(
-                    token_id=token_id,
-                    price=entry_price,
-                    size=shares,
-                    side=BUY,
+            cursor = await db.execute(
+                """INSERT INTO trades
+                   (timestamp, condition_id, token_id, side, signal_score,
+                    entry_price, size_usd, shares, signal_details, btc_price,
+                    dry_run, order_id, order_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    timestamp, condition_id, token_id, side, signal_score,
+                    entry_price, size_usd, shares, json.dumps(signal_details),
+                    btc_price, 1, order_id, "filled",
                 ),
             )
+            await db.commit()
+            trade_id = cursor.lastrowid
+        finally:
+            await db.close()
 
-            # GTC limit order — sits on book until filled
-            order_type = OrderType.GTC
-            order = client.post_order(signed_order, orderType=order_type)
+        await state.set("has_open_position", True)
+        await state.set("current_exposure", size_usd)
 
-            if not order or not order.get("orderID"):
-                return TradeResult(success=False, error="Order rejected")
+        return TradeResult(
+            success=True,
+            trade_id=trade_id,
+            order_id=order_id,
+            filled_price=entry_price,
+            filled_size=size_usd,
+            shares=shares,
+            side=side,
+        )
 
-            order_id = order["orderID"]
-            logger.info(
-                "ORDER PLACED: %s | %s | $%.2f @ %.4f | order=%s | type=%s",
-                side.upper(),
-                condition_id[:16],
-                size_usd,
-                entry_price,
-                order_id,
-                "GTC",
-            )
+    # --- LIVE execution ---
+    client = _get_client()
+    if client is None:
+        return TradeResult(success=False, error="CLOB client not initialized")
 
-            # Fill verification for GTC orders
-            if True:
-                import asyncio
-                filled = False
-                for attempt in range(3):  # Check every 5s for 15s
-                    await asyncio.sleep(5)
-                    try:
-                        order_status = client.get_order(order_id)
-                        status = (order_status or {}).get("status", "").lower()
-                        if status in ("matched", "filled"):
-                            filled = True
-                            break
-                        elif status in ("cancelled", "expired"):
-                            logger.warning("GTC order %s was %s", order_id, status)
-                            return TradeResult(success=False, error=f"Order {status}")
-                    except Exception:
-                        pass
-
-                if not filled:
-                    # Cancel unfilled GTC order
-                    try:
-                        client.cancel(order_id)
-                        logger.warning("GTC order %s cancelled after 15s timeout", order_id)
-                    except Exception:
-                        pass
-                    return TradeResult(success=False, error="GTC order timed out (15s) — cancelled")
-
-                # Update balance/allowance for CONDITIONAL tokens so we can SELL later
-                try:
-                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                    client.update_balance_allowance(
-                        BalanceAllowanceParams(
-                            asset_type=AssetType.CONDITIONAL,
-                            token_id=token_id,
-                        )
-                    )
-                    logger.info("Updated CONDITIONAL allowance for token %s", token_id[:16])
-                except Exception as e:
-                    logger.warning("Failed to update CONDITIONAL allowance: %s", e)
-
-        except Exception as e:
-            logger.error("Order execution failed: %s", e)
-            return TradeResult(success=False, error=str(e))
-
-    # Record trade in DB
-    db = await get_db()
     try:
-        cursor = await db.execute(
-            """INSERT INTO trades
-               (timestamp, condition_id, token_id, side, signal_score,
-                entry_price, size_usd, shares, signal_details, btc_price)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                timestamp,
-                condition_id,
-                token_id,
-                side,
-                signal_score,
-                entry_price,
-                size_usd,
-                shares,
-                json.dumps(signal_details),
-                btc_price,
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY
+
+        # Proportional slippage: ~3% of price to cross spread aggressively
+        slippage = max(0.02, round(entry_price * 0.03, 2))
+        entry_price = min(entry_price + slippage, 0.95)
+
+        # Round price to valid tick size
+        tick_size = client.get_tick_size(token_id)
+        if tick_size:
+            tick = float(tick_size)
+            entry_price = round(round(entry_price / tick) * tick, 4)
+
+        # Integer shares: Polymarket requires minimum 5 shares per order.
+        MIN_SHARES = 5
+        min_trade = get("min_trade_usd", 1.0)
+        shares = max(MIN_SHARES, math.floor(size_usd / entry_price))
+        size_usd = round(shares * entry_price, 2)
+        if size_usd < min_trade:
+            shares = max(MIN_SHARES, math.ceil(min_trade / entry_price))
+            size_usd = round(shares * entry_price, 2)
+
+        # 3a. INSERT pre-order row so we never lose track of the trade
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                """INSERT INTO trades
+                   (timestamp, condition_id, token_id, side, signal_score,
+                    entry_price, size_usd, shares, signal_details, btc_price,
+                    dry_run, order_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    timestamp, condition_id, token_id, side, signal_score,
+                    entry_price, size_usd, shares, json.dumps(signal_details),
+                    btc_price, 0, "pending_fill",
+                ),
+            )
+            await db.commit()
+            trade_id = cursor.lastrowid
+        finally:
+            await db.close()
+
+        # Create signed order
+        signed_order = client.create_order(
+            order_args=OrderArgs(
+                token_id=token_id,
+                price=entry_price,
+                size=shares,
+                side=BUY,
             ),
         )
-        await db.commit()
-        trade_id = cursor.lastrowid
-    finally:
-        await db.close()
+
+        # GTC limit order — sits on book until filled
+        order_type = OrderType.GTC
+        order = client.post_order(signed_order, orderType=order_type)
+
+        if not order or not order.get("orderID"):
+            # Order rejected — clean up pre-order row
+            await _delete_trade(trade_id)
+            return TradeResult(success=False, error="Order rejected")
+
+        order_id = order["orderID"]
+
+        # Update DB with order_id
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE trades SET order_id = ? WHERE id = ?",
+                (order_id, trade_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        logger.info(
+            "ORDER PLACED: %s | %s | $%.2f @ %.4f | order=%s | type=%s",
+            side.upper(),
+            condition_id[:16],
+            size_usd,
+            entry_price,
+            order_id,
+            "GTC",
+        )
+
+        # Fill verification for GTC orders
+        import asyncio
+        filled = False
+        fill_price = entry_price
+        fill_size = size_usd
+        for attempt in range(3):  # Check every 5s for 15s
+            await asyncio.sleep(5)
+            try:
+                order_resp = client.get_order(order_id)
+                status = (order_resp or {}).get("status", "").lower()
+                if status in ("matched", "filled"):
+                    filled = True
+                    # F4: Extract real fill price/size from response
+                    if order_resp.get("associate_trades"):
+                        trades_list = order_resp["associate_trades"]
+                        if trades_list:
+                            total_cost = sum(
+                                float(t.get("price", 0)) * float(t.get("size", 0))
+                                for t in trades_list
+                            )
+                            total_shares = sum(float(t.get("size", 0)) for t in trades_list)
+                            if total_shares > 0:
+                                fill_price = round(total_cost / total_shares, 6)
+                                fill_size = round(total_cost, 2)
+                                shares = total_shares
+                    break
+                elif status in ("cancelled", "expired"):
+                    logger.warning("GTC order %s was %s", order_id, status)
+                    await _delete_trade(trade_id)
+                    return TradeResult(success=False, error=f"Order {status}")
+            except Exception:
+                pass
+
+        if not filled:
+            # Cancel unfilled GTC order
+            try:
+                client.cancel(order_id)
+                logger.warning("GTC order %s cancelled after 15s timeout", order_id)
+            except Exception:
+                pass
+            # Verify cancel worked — order might have filled during cancel
+            await asyncio.sleep(2)
+            try:
+                final_resp = client.get_order(order_id)
+                final_status = (final_resp or {}).get("status", "").lower()
+                if final_status in ("matched", "filled"):
+                    logger.info("GTC order %s filled during cancel — recovering", order_id)
+                    db = await get_db()
+                    try:
+                        await db.execute(
+                            "UPDATE trades SET order_status = 'filled' WHERE id = ?",
+                            (trade_id,),
+                        )
+                        await db.commit()
+                    finally:
+                        await db.close()
+                    await state.set("has_open_position", True)
+                    await state.set("current_exposure", size_usd)
+                    return TradeResult(
+                        success=True, trade_id=trade_id, order_id=order_id,
+                        filled_price=entry_price, filled_size=size_usd,
+                        shares=shares, side=side,
+                    )
+            except Exception:
+                pass
+            await _delete_trade(trade_id)
+            return TradeResult(success=False, error="GTC order timed out (15s) — cancelled")
+
+        # Update DB: mark filled with real prices
+        db = await get_db()
+        try:
+            await db.execute(
+                """UPDATE trades SET order_status = 'filled',
+                   entry_price = ?, size_usd = ?, shares = ?
+                   WHERE id = ?""",
+                (fill_price, fill_size, shares, trade_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Update balance/allowance for CONDITIONAL tokens so we can SELL later
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            client.update_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                )
+            )
+            logger.info("Updated CONDITIONAL allowance for token %s", token_id[:16])
+        except Exception as e:
+            logger.warning("Failed to update CONDITIONAL allowance: %s", e)
+
+    except Exception as e:
+        logger.error("Order execution failed: %s", e)
+        # If we already have a trade_id, clean up
+        if 'trade_id' in locals():
+            await _delete_trade(trade_id)
+        return TradeResult(success=False, error=str(e))
 
     await state.set("has_open_position", True)
-    await state.set("current_exposure", size_usd)
+    await state.set("current_exposure", fill_size)
 
     return TradeResult(
         success=True,
         trade_id=trade_id,
         order_id=order_id,
-        filled_price=entry_price,
-        filled_size=size_usd,
+        filled_price=fill_price,
+        filled_size=fill_size,
         shares=shares,
         side=side,
     )
+
+
+async def _delete_trade(trade_id: int):
+    """Remove a pre-order trade row that never got filled."""
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+        await db.commit()
+        logger.info("Cleaned up unfilled trade row %d", trade_id)
+    finally:
+        await db.close()
+
+
+async def recover_pending_fills():
+    """Recover trades stuck in pending_fill status (crash during order placement).
+
+    Called on startup before the main trading loop.
+    Checks order status via CLOB API and either marks filled or deletes.
+    """
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, order_id FROM trades WHERE order_status = 'pending_fill'"
+        )
+        pending = await cursor.fetchall()
+    finally:
+        await db.close()
+
+    if not pending:
+        return
+
+    logger.warning("Found %d pending_fill trades to recover", len(pending))
+    client = _get_client()
+
+    for trade in pending:
+        trade_id = trade["id"]
+        order_id = trade["order_id"]
+
+        if not order_id or not client:
+            # No order was ever placed — safe to delete
+            await _delete_trade(trade_id)
+            continue
+
+        try:
+            order_resp = client.get_order(order_id)
+            status = (order_resp or {}).get("status", "").lower()
+            if status in ("matched", "filled"):
+                # Was actually filled — mark it
+                db = await get_db()
+                try:
+                    await db.execute(
+                        "UPDATE trades SET order_status = 'filled' WHERE id = ?",
+                        (trade_id,),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+                logger.info("Recovered pending_fill trade %d as FILLED (order=%s)", trade_id, order_id)
+            else:
+                # Not filled — cancel if still live, verify, then delete
+                try:
+                    client.cancel(order_id)
+                except Exception:
+                    pass
+                import asyncio
+                await asyncio.sleep(2)
+                try:
+                    recheck = client.get_order(order_id)
+                    recheck_status = (recheck or {}).get("status", "").lower()
+                    if recheck_status in ("matched", "filled"):
+                        db = await get_db()
+                        try:
+                            await db.execute(
+                                "UPDATE trades SET order_status = 'filled' WHERE id = ?",
+                                (trade_id,),
+                            )
+                            await db.commit()
+                        finally:
+                            await db.close()
+                        logger.info("Recovered pending_fill trade %d as FILLED (late fill during cancel)", trade_id)
+                        continue
+                except Exception:
+                    pass
+                await _delete_trade(trade_id)
+                logger.info("Recovered pending_fill trade %d: order %s was %s — deleted", trade_id, order_id, status)
+        except Exception as e:
+            logger.warning("Could not recover pending_fill trade %d: %s — deleting", trade_id, e)
+            await _delete_trade(trade_id)
 
 
 async def exit_position(
@@ -373,17 +570,36 @@ async def resolve_trade(trade_id: int, won: bool, bankroll: float,
             logger.error("Trade %d not found", trade_id)
             return bankroll
 
+        # Polymarket taker fee on 5-min crypto markets: 10% (fee_rate_bps=1000)
+        # Fee is charged on BUY (entry) and SELL (early exit), NOT on redemption
+        TAKER_FEE = 0.10
+
         if exit_proceeds is not None:
-            # Early exit (stop-loss or take-profit): proceeds from selling minus cost
-            pnl = exit_proceeds - trade["size_usd"]
+            # Early exit: gross proceeds from sell, both entry and exit have fees
+            sell_fee = round(exit_proceeds * TAKER_FEE, 4)
+            entry_fee = round(trade["size_usd"] * TAKER_FEE, 4)
+            fee = entry_fee + sell_fee
+            pnl = (exit_proceeds - sell_fee) - (trade["size_usd"] + entry_fee)
             outcome = exit_type or "stop_loss"
         elif won:
-            # Binary payout: shares * $1 - cost
-            pnl = trade["shares"] - trade["size_usd"]
+            # Win: redeem shares for $1 each (no fee on redemption)
+            # Entry fee was charged when buying
+            payout = trade["shares"]  # shares * $1.00
+            entry_fee = round(trade["size_usd"] * TAKER_FEE, 4)
+            fee = entry_fee
+            pnl = payout - trade["size_usd"] - entry_fee
             outcome = "win"
         else:
-            pnl = -trade["size_usd"]
+            # Loss: lost entry cost + entry fee
+            entry_fee = round(trade["size_usd"] * TAKER_FEE, 4)
+            fee = entry_fee
+            pnl = -(trade["size_usd"] + entry_fee)
             outcome = "loss"
+
+        # Track cumulative fees
+        from bot.state import state
+        daily_fees = await state.get("daily_fees", 0.0)
+        await state.set("daily_fees", round(daily_fees + fee, 4))
 
         new_bankroll = bankroll + pnl
 

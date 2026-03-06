@@ -37,95 +37,53 @@ def momentum_signal(buf: PriceBuffer) -> float | None:
     return _normalize(raw, scale=150)
 
 
+def rsi_signal(buf: PriceBuffer) -> float | None:
+    """RSI normalized to [-1, 1]. RSI > 50 → positive (bullish), < 50 → negative."""
+    snap = buf.snapshot()
+    if snap is None:
+        return None
+    rsi = snap.get("rsi_14")
+    if rsi is None:
+        return None
+    return _clamp((rsi - 50.0) / 50.0)
+
+
 def book_skew_signal(poly_ws: PolymarketWS) -> float | None:
     """Orderbook imbalance. Returns None if book is empty or one-sided."""
     ob = poly_ws.orderbook
-    # Need BOTH sides to compute meaningful imbalance
     if not ob.bids or not ob.asks:
         return None
-    # Need minimum liquidity on each side
     if ob.bid_volume(5) < 0.10 or ob.ask_volume(5) < 0.10:
         return None
     return _clamp(ob.imbalance(levels=5))
 
 
-def volatility_multiplier(buf: PriceBuffer) -> tuple[float, float]:
-    """Returns (momentum_mult, fair_value_mult) based on vol regime."""
-    vr = buf.vol_ratio()
-    if vr is None:
-        return (1.0, 1.0)
-
-    if vr > 1.5:
-        return (1.3, 0.7)
-    elif vr < 0.7:
-        return (0.7, 1.3)
-    else:
-        t = (vr - 0.7) / 0.8
-        mom_mult = 0.7 + t * 0.6
-        fv_mult = 1.3 - t * 0.6
-        return (mom_mult, fv_mult)
-
-
-def fair_value_signal(
-    buf: PriceBuffer, poly_ws: PolymarketWS, mom: float
-) -> float | None:
-    """Detect mispricing: BTC momentum implies a probability that Polymarket hasn't priced in.
-
-    If BTC is surging but the Up token mid hasn't moved, there's edge.
-    """
-    ob = poly_ws.orderbook
-    mid = ob.midpoint
-    if mid is None:
-        return None
-
-    # BTC momentum → implied probability for the Up token
-    # mom ∈ [-1, 1] → btc_implied_prob ∈ [0, 1]
-    btc_implied_prob = 0.5 + mom * 0.5
-
-    # Gap: what BTC says vs what Polymarket prices
-    gap = btc_implied_prob - mid
-
-    return _normalize(gap, scale=10)
-
-
 def compute_signal(
     buf: PriceBuffer,
     poly_ws: PolymarketWS,
-    rag_signal: float = 0.0,
-    sentiment_signal: float = 0.0,
 ) -> dict:
     """Compute composite trading signal. Returns dict with components + total."""
-    # Validate external inputs
-    rag_signal = _clamp(rag_signal) if isinstance(rag_signal, (int, float)) and math.isfinite(rag_signal) else 0.0
-    sentiment_signal = _clamp(sentiment_signal) if isinstance(sentiment_signal, (int, float)) and math.isfinite(sentiment_signal) else 0.0
-
     weights = get("weights", {})
-    w_mom = weights.get("momentum", 0.30)
-    w_skew = weights.get("book_skew", 0.20)
-    w_fv = weights.get("fair_value", 0.20)
-    w_rag = weights.get("rag_pattern", 0.10)
-    w_sent = weights.get("sentiment", 0.05)
+    w_mom = weights.get("momentum", 0.70)
+    w_skew = weights.get("book_skew", 0.15)
+    w_rsi = weights.get("rsi", 0.15)
 
     # Normalize weights to sum to 1.0
-    w_total = w_mom + w_skew + w_fv + w_rag + w_sent
+    w_total = w_mom + w_skew + w_rsi
     if w_total > 0:
         w_mom /= w_total
         w_skew /= w_total
-        w_fv /= w_total
-        w_rag /= w_total
-        w_sent /= w_total
+        w_rsi /= w_total
 
     mom = momentum_signal(buf)
     skew = book_skew_signal(poly_ws)
-    mom_mult, fv_mult = volatility_multiplier(buf)
+    rsi = rsi_signal(buf)
 
     result = {
         "momentum": mom,
         "book_skew": skew,
+        "rsi": rsi,
         "vol_ratio": buf.vol_ratio(),
-        "fair_value": None,
-        "rag_pattern": rag_signal,
-        "sentiment": sentiment_signal,
         "composite": None,
         "tradeable": False,
     }
@@ -133,21 +91,14 @@ def compute_signal(
     if mom is None:
         return result
 
-    fv = fair_value_signal(buf, poly_ws, mom)
-    result["fair_value"] = fv
-
     # Composite — only weight signals that are actually contributing
-    # Dead signals (None or 0.0) don't dilute the composite
+    # Dead signals (None) don't dilute the composite
     components = []
-    components.append((w_mom, mom_mult * mom))
+    components.append((w_mom, mom))
     if skew is not None:
         components.append((w_skew, skew))
-    if fv is not None and fv != 0.0:
-        components.append((w_fv, fv_mult * fv))
-    if rag_signal != 0.0:
-        components.append((w_rag, rag_signal))
-    if sentiment_signal != 0.0:
-        components.append((w_sent, sentiment_signal))
+    if rsi is not None:
+        components.append((w_rsi, rsi))
 
     active_weight = sum(w for w, _ in components)
     if active_weight > 0:
@@ -158,7 +109,8 @@ def compute_signal(
     composite = _clamp(composite)
     result["composite"] = composite
 
-    threshold = get("trade_threshold", 0.15)
-    result["tradeable"] = abs(composite) >= threshold
+    threshold = get("trade_threshold", 0.20)
+    max_signal = get("max_signal", 0.35)
+    result["tradeable"] = threshold <= abs(composite) <= max_signal
 
     return result

@@ -4,10 +4,15 @@ const API = '';
 let ws = null;
 let wsRetries = 0;
 let equityChart = null;
+let allTrades = [];       // full trade list for chart filtering
+let chartRange = '7d';    // current chart filter
+let tradeMode = 'all';   // paper | live | all
 let prevBtcPrice = null;
 let currentTradeThreshold = 0.06;
 const activityLog = [];  // max 8 entries
 const MAX_ACTIVITY = 8;
+let statsDateFilter = 'all'; // 'all' | 'today' | 'YYYY-MM-DD'
+let lastStatusData = null;   // cache for re-rendering filtered stats
 
 // --- Init ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -16,9 +21,63 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchTrades();
     connectWS();
     fetchBtcPrice();
-    setInterval(fetchStatus, 10000);
-    setInterval(fetchTrades, 15000);  // Refresh trades periodically (catches resolved PENDINGs)
+    setInterval(fetchStatus, 5000);
+    setInterval(fetchTrades, 15000);
     setInterval(fetchBtcPrice, 15000);
+
+    // Chart range filters
+    document.getElementById('chartFilters').addEventListener('click', (e) => {
+        const btn = e.target.closest('.chart-filter-btn');
+        if (!btn) return;
+        document.querySelectorAll('#chartFilters .chart-filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        chartRange = btn.dataset.range;
+        updateEquityChart(allTrades);
+    });
+
+    // Trade mode filters (All / Paper / Live)
+    document.getElementById('modeFilters').addEventListener('click', (e) => {
+        const btn = e.target.closest('.chart-filter-btn');
+        if (!btn) return;
+        document.querySelectorAll('#modeFilters .chart-filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        tradeMode = btn.dataset.mode;
+        fetchTrades();
+    });
+
+    // Stats date filter
+    const statsFilterWrap = document.querySelector('.stats-date-filter');
+    const statsDateInput = document.getElementById('statsDateInput');
+    if (statsFilterWrap) {
+        statsFilterWrap.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-stats]');
+            if (!btn) return;
+            statsFilterWrap.querySelectorAll('.chart-filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const mode = btn.dataset.stats;
+            if (mode === 'all') {
+                statsDateFilter = 'all';
+                statsDateInput.style.display = 'none';
+                recalcFilteredStats();
+            } else if (mode === 'today') {
+                statsDateFilter = 'today';
+                statsDateInput.style.display = 'none';
+                recalcFilteredStats();
+            } else if (mode === 'custom') {
+                statsDateInput.style.display = '';
+                if (statsDateInput.value) {
+                    statsDateFilter = statsDateInput.value;
+                    recalcFilteredStats();
+                }
+            }
+        });
+        statsDateInput.addEventListener('change', () => {
+            if (statsDateInput.value) {
+                statsDateFilter = statsDateInput.value;
+                recalcFilteredStats();
+            }
+        });
+    }
 });
 
 // --- WebSocket with reconnect backoff ---
@@ -100,10 +159,12 @@ async function fetchStatus() {
 
 async function fetchTrades() {
     try {
-        const res = await fetch(`${API}/api/trades?limit=20`);
+        const res = await fetch(`${API}/api/trades?limit=500&mode=${tradeMode}`);
         const trades = await res.json();
+        allTrades = trades;
         renderTrades(trades, false);
         updateEquityChart(trades);
+        if (statsDateFilter !== 'all') recalcFilteredStats();
     } catch (e) {
         console.error('Trades fetch failed:', e);
     }
@@ -151,16 +212,24 @@ function updateStatus(data) {
         text.textContent = 'STOPPED';
     }
 
-    // Bankroll
-    const bankroll = data.bankroll || 0;
-    const bankrollEl = document.getElementById('bankroll');
-    animateValue(bankrollEl, bankroll, '$', '', 2);
+    // Training mode banner
+    const tb = document.getElementById('trainingBanner');
+    if (tb) tb.style.display = data.dry_run ? 'block' : 'none';
 
-    // Wallet balance (on-chain)
-    const walletEl = document.getElementById('walletBalance');
-    if (walletEl && data.wallet_balance != null) {
-        walletEl.textContent = `Wallet: $${data.wallet_balance.toFixed(2)}`;
-    }
+    // Wallet Real (on-chain balance — the real number)
+    const bankroll = data.bankroll || 0;
+    const walletBal = data.wallet_balance;
+    const realBal = walletBal != null ? walletBal : bankroll;
+    const initialDeposit = data.initial_deposit || bankroll;
+    const bankrollOpen = data.bankroll_open || initialDeposit;
+
+    const walletEl = document.getElementById('walletTotal');
+    animateValue(walletEl, realBal, '$', '', 2);
+
+    const unredeemed = data.unredeemed_value || 0;
+    const depositLine = `Invertido: $${initialDeposit.toFixed(2)}`;
+    const unredeemedLine = unredeemed > 0 ? ` · Pendiente: $${unredeemed.toFixed(2)}` : '';
+    document.getElementById('walletDeposit').textContent = depositLine + unredeemedLine;
 
     // Daily PnL
     const dailyPnl = data.daily_pnl || 0;
@@ -169,10 +238,30 @@ function updateStatus(data) {
     animateValue(pnlEl, dailyPnl, sign + '$', '', 2);
     pnlEl.className = `card-value ${dailyPnl >= 0 ? 'positive' : 'negative'}`;
 
-    if (bankroll > 0) {
-        const pct = (dailyPnl / bankroll * 100);
+    if (bankrollOpen > 0) {
+        const pct = (dailyPnl / bankrollOpen * 100);
         const pctEl = document.getElementById('dailyPnlPct');
-        pctEl.textContent = `${dailyPnl >= 0 ? '+' : ''}${pct.toFixed(1)}% today`;
+        pctEl.textContent = `${dailyPnl >= 0 ? '+' : ''}${pct.toFixed(1)}% · Open: $${bankrollOpen.toFixed(2)}`;
+    }
+
+    // Fees transparency
+    const fees = data.daily_fees || 0;
+    const feesEl = document.getElementById('dailyFees');
+    if (feesEl && fees > 0) {
+        const gross = dailyPnl + fees;
+        feesEl.textContent = `Bruto: +$${gross.toFixed(2)} · Fees: -$${fees.toFixed(2)}`;
+    }
+
+    // Net Profit — only update from status when filter is "all"
+    lastStatusData = data;
+    if (statsDateFilter === 'all') {
+        const netProfit = realBal - initialDeposit;
+        const netEl = document.getElementById('netProfit');
+        const netSign = netProfit >= 0 ? '+' : '';
+        animateValue(netEl, netProfit, netSign + '$', '', 2);
+        netEl.className = `card-value ${netProfit >= 0 ? 'positive' : 'negative'}`;
+        const roi = initialDeposit > 0 ? (netProfit / initialDeposit * 100) : 0;
+        document.getElementById('netProfitSub').textContent = `ROI: ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`;
     }
 
     // Risk
@@ -250,9 +339,7 @@ function updateStatus(data) {
 function handleSignal(sig) {
     updateSignalBar('Mom', sig.momentum);
     updateSignalBar('Skew', sig.book_skew);
-    updateSignalBar('FV', sig.fair_value);
-    updateSignalBar('RAG', sig.rag_pattern);
-    updateSignalBar('Sent', sig.sentiment);
+    updateSignalBar('RSI', sig.rsi);
     updateGauge(sig.composite);
     updateGaugeExplanation(sig.composite);
 }
@@ -396,20 +483,8 @@ function renderTrades(trades, flash) {
     const body = document.getElementById('tradesBody');
     body.innerHTML = '';
 
-    // Summary stats
-    const resolved = trades.filter(t => t.outcome);
-    const wins = resolved.filter(t => t.outcome === 'win' || t.outcome === 'take_profit').length;
-    const total = resolved.length;
-
-    if (total > 0) {
-        const wr = (wins / total * 100);
-        const wrEl = document.getElementById('winRate');
-        animateValue(wrEl, wr, '', '%', 1);
-        document.getElementById('winRateSub').textContent = `${wins}W / ${total - wins}L`;
-    }
-
-    const todayEl = document.getElementById('tradesToday');
-    todayEl.textContent = trades.length;
+    // Win rate — use filtered trades if filter is active
+    renderWinRate(statsDateFilter === 'all' ? trades : getFilteredTrades(trades));
 
     for (let i = 0; i < Math.min(trades.length, 20); i++) {
         const t = trades[i];
@@ -425,6 +500,7 @@ function renderTrades(trades, flash) {
 
         const sideClass = t.side === 'up' ? 'side-up' : 'side-down';
         const sideLabel = t.side === 'up' ? 'UP \u25b2' : 'DOWN \u25bc';
+        const modeBadge = t.dry_run ? '<span class="badge badge-paper">PAPER</span>' : '<span class="badge badge-live-tag">LIVE</span>';
 
         let resultHtml;
         if (t.outcome === 'win' || t.outcome === 'take_profit') {
@@ -445,7 +521,7 @@ function renderTrades(trades, flash) {
         tr.innerHTML = `
             <td>${time}</td>
             <td>${(t.signal_score || 0).toFixed(2)}</td>
-            <td class="${sideClass}">${sideLabel}</td>
+            <td class="${sideClass}">${sideLabel} ${modeBadge}</td>
             <td>$${(t.size_usd || 0).toFixed(2)}</td>
             <td>${(t.entry_price || 0).toFixed(2)}\u00a2</td>
             <td>${btcLabel}</td>
@@ -500,6 +576,23 @@ function initChart() {
                 pointHoverBorderColor: '#fff',
                 pointHoverBorderWidth: 2,
                 borderWidth: 2,
+                yAxisID: 'y',
+            }, {
+                label: 'Win Rate',
+                data: [],
+                borderColor: '#22d3ee',
+                backgroundColor: 'transparent',
+                fill: false,
+                tension: 0.4,
+                pointRadius: 0,
+                pointHitRadius: 8,
+                pointHoverRadius: 4,
+                pointHoverBackgroundColor: '#22d3ee',
+                pointHoverBorderColor: '#fff',
+                pointHoverBorderWidth: 2,
+                borderWidth: 1.5,
+                borderDash: [4, 3],
+                yAxisID: 'yWR',
             }]
         },
         options: {
@@ -510,7 +603,15 @@ function initChart() {
                 mode: 'index',
             },
             plugins: {
-                legend: { display: false },
+                legend: {
+                    display: true,
+                    labels: {
+                        color: '#6a6a82',
+                        font: { family: "'Inter', sans-serif", size: 10 },
+                        boxWidth: 12,
+                        padding: 12,
+                    },
+                },
                 tooltip: {
                     backgroundColor: 'rgba(13,13,22,0.9)',
                     borderColor: 'rgba(255,255,255,0.1)',
@@ -518,9 +619,12 @@ function initChart() {
                     titleFont: { family: "'Inter', sans-serif", size: 11 },
                     bodyFont: { family: "'SF Mono', monospace", size: 12 },
                     padding: 10,
-                    displayColors: false,
+                    displayColors: true,
                     callbacks: {
-                        label: (ctx) => `$${ctx.parsed.y.toFixed(2)}`
+                        label: (ctx) => {
+                            if (ctx.datasetIndex === 0) return `Bankroll: $${ctx.parsed.y.toFixed(2)}`;
+                            return `Win Rate: ${ctx.parsed.y.toFixed(0)}%`;
+                        }
                     }
                 }
             },
@@ -537,13 +641,28 @@ function initChart() {
                 },
                 y: {
                     display: true,
+                    position: 'left',
                     ticks: {
-                        color: '#6a6a82',
+                        color: '#8b5cf6',
                         font: { family: "'SF Mono', monospace", size: 10 },
                         callback: v => `$${v}`,
                         maxTicksLimit: 5,
                     },
                     grid: { color: 'rgba(255,255,255,0.03)' },
+                    border: { display: false },
+                },
+                yWR: {
+                    display: true,
+                    position: 'right',
+                    min: 0,
+                    max: 100,
+                    ticks: {
+                        color: '#22d3ee',
+                        font: { family: "'SF Mono', monospace", size: 10 },
+                        callback: v => `${v}%`,
+                        maxTicksLimit: 5,
+                    },
+                    grid: { display: false },
                     border: { display: false },
                 }
             }
@@ -551,16 +670,116 @@ function initChart() {
     });
 }
 
+function filterByRange(trades, range) {
+    if (range === 'all') return trades;
+    const now = Date.now();
+    const ms = { '1h': 3600e3, '6h': 6*3600e3, '1d': 86400e3, '7d': 7*86400e3, '30d': 30*86400e3 };
+    const cutoff = now - (ms[range] || 3600e3);
+    return trades.filter(t => new Date(t.timestamp).getTime() >= cutoff);
+}
+
 function updateEquityChart(trades) {
     if (!equityChart || !trades.length) return;
 
-    const resolved = trades.filter(t => t.bankroll_after != null).reverse();
+    const filtered = filterByRange(trades, chartRange);
+    const resolved = filtered
+        .filter(t => t.bankroll_after != null)
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     if (!resolved.length) return;
 
+    // Cumulative win rate (within visible range)
+    let wins = 0;
+    const winRates = resolved.map((t, i) => {
+        if (t.pnl > 0) wins++;
+        return (wins / (i + 1)) * 100;
+    });
+
+    // Format labels based on range
+    const useDateLabel = chartRange === '7d' || chartRange === '30d' || chartRange === 'all';
     equityChart.data.labels = resolved.map(t => {
         const d = new Date(t.timestamp);
+        if (useDateLabel) {
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                + ' ' + d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        }
         return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
     });
     equityChart.data.datasets[0].data = resolved.map(t => t.bankroll_after);
+    equityChart.data.datasets[1].data = winRates;
     equityChart.update('none');
+}
+
+// --- Stats Date Filter helpers ---
+function getStatsFilterCutoff() {
+    if (statsDateFilter === 'all') return null;
+    if (statsDateFilter === 'today') {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    }
+    // Custom date string 'YYYY-MM-DD'
+    return new Date(statsDateFilter + 'T00:00:00');
+}
+
+function getFilteredTrades(trades) {
+    const cutoff = getStatsFilterCutoff();
+    if (!cutoff) return trades;
+    return trades.filter(t => t.timestamp && new Date(t.timestamp) >= cutoff);
+}
+
+function renderWinRate(trades) {
+    const resolved = trades.filter(t => t.outcome);
+    const wins = resolved.filter(t => t.outcome === 'win' || t.outcome === 'take_profit').length;
+    const total = resolved.length;
+
+    if (total > 0) {
+        const wr = (wins / total * 100);
+        const wrEl = document.getElementById('winRate');
+        animateValue(wrEl, wr, '', '%', 1);
+        document.getElementById('winRateSub').textContent = `${wins}W / ${total - wins}L · ${total} trades`;
+    } else {
+        document.getElementById('winRate').textContent = '\u2014';
+        document.getElementById('winRateSub').textContent = '0 trades';
+    }
+}
+
+function recalcFilteredStats() {
+    if (!allTrades.length) return;
+    const filtered = getFilteredTrades(allTrades);
+
+    // Win rate
+    renderWinRate(filtered);
+
+    // Net profit
+    const netEl = document.getElementById('netProfit');
+    const netSub = document.getElementById('netProfitSub');
+
+    if (statsDateFilter === 'all') {
+        // Restore wallet-based net profit from last status
+        if (lastStatusData) {
+            const walletBal = lastStatusData.wallet_balance;
+            const bankroll = lastStatusData.bankroll || 0;
+            const realBal = walletBal != null ? walletBal : bankroll;
+            const initialDeposit = lastStatusData.initial_deposit || bankroll;
+            const netProfit = realBal - initialDeposit;
+            const netSign = netProfit >= 0 ? '+' : '';
+            animateValue(netEl, netProfit, netSign + '$', '', 2);
+            netEl.className = `card-value ${netProfit >= 0 ? 'positive' : 'negative'}`;
+            const roi = initialDeposit > 0 ? (netProfit / initialDeposit * 100) : 0;
+            netSub.textContent = `ROI: ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`;
+        }
+        return;
+    }
+
+    // Filtered: sum PnL from resolved trades
+    const resolved = filtered.filter(t => t.outcome && t.pnl != null);
+    const sumPnl = resolved.reduce((s, t) => s + t.pnl, 0);
+    const netSign = sumPnl >= 0 ? '+' : '';
+    animateValue(netEl, sumPnl, netSign + '$', '', 2);
+    netEl.className = `card-value ${sumPnl >= 0 ? 'positive' : 'negative'}`;
+
+    // Sub-text with context
+    const cutoff = getStatsFilterCutoff();
+    const label = statsDateFilter === 'today' ? 'Today' :
+        `Since ${cutoff.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    netSub.textContent = `${label} · ${resolved.length} trades`;
 }

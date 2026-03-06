@@ -19,6 +19,16 @@ async def init_db():
     db = await get_db()
     try:
         await db.executescript(schema)
+        # Idempotent migrations: add columns if missing
+        for col_sql in [
+            "ALTER TABLE trades ADD COLUMN dry_run BOOLEAN DEFAULT 1",
+            "ALTER TABLE trades ADD COLUMN order_id TEXT",
+            "ALTER TABLE trades ADD COLUMN order_status TEXT DEFAULT 'filled'",
+        ]:
+            try:
+                await db.execute(col_sql)
+            except Exception:
+                pass  # Column already exists
         await db.commit()
     finally:
         await db.close()

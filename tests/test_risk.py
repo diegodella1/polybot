@@ -10,6 +10,23 @@ import time
 from unittest.mock import AsyncMock, patch
 
 
+@pytest.fixture(autouse=True)
+def mock_risk_config():
+    def fake_get(key, default=None):
+        overrides = {
+            "trade_threshold": 0.15,
+            "bankroll_floor_usd": 5.0,
+            "max_consecutive_losses": 3,
+            "min_win_rate": 0,
+            "circuit_breaker_window": 40,
+            "max_exposure_usd": 15.0,
+            "trade_cooldown_seconds": 15,
+        }
+        return overrides.get(key, default)
+    with patch("bot.risk.get", side_effect=fake_get):
+        yield
+
+
 # Mock state and db before importing risk
 @pytest.fixture(autouse=True)
 def mock_state():
@@ -108,14 +125,14 @@ class TestRiskCheck:
     @pytest.mark.asyncio
     async def test_trade_cooldown_blocks(self, mock_state):
         from bot.risk import check_risk
-        # Last trade was 30 seconds ago, cooldown is 600s
+        # Last trade was 5 seconds ago, cooldown is 15s (from config.yaml)
         mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
             "enabled": True,
             "consecutive_losses": 0,
             "cooldown_remaining": 0,
             "current_exposure": 0.0,
             "has_open_position": False,
-            "last_trade_timestamp": time.time() - 30,  # 30s ago
+            "last_trade_timestamp": time.time() - 5,  # 5s ago < 15s cooldown
         }.get(k, d))
 
         result = await check_risk(0.5, 100.0)

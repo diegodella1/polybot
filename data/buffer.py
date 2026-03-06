@@ -74,12 +74,13 @@ class PriceBuffer:
         else:
             self._current = candle
 
-    def ret(self, periods: int) -> float | None:
-        """Return over N closed candles."""
+    def ret(self, periods: int, use_live: bool = False) -> float | None:
+        """Return over N candles. If use_live, use current tick as 'new'."""
         if len(self._candles) < periods + 1:
             return None
         old = self._candles[-(periods + 1)].close
-        new = self._candles[-1].close
+        new = (self._current.close if use_live and self._current else
+               self._candles[-1].close)
         if old == 0:
             return None
         return (new - old) / old
@@ -147,9 +148,9 @@ class PriceBuffer:
             return None
         return {
             "price": price,
-            "ret_1m": self.ret(1),
-            "ret_5m": self.ret(5),
-            "ret_15m": self.ret(15),
+            "ret_1m": self.ret(1, use_live=True),
+            "ret_5m": self.ret(5, use_live=True),
+            "ret_15m": self.ret(15, use_live=True),
             "ema_fast": self.ema(5),
             "ema_slow": self.ema(15),
             "atr_5": self.atr(5),

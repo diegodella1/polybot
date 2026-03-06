@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polybot</title>
-    <link rel="stylesheet" href="/static/style.css?v=6">
+    <link rel="stylesheet" href="/static/style.css?v=11">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
@@ -25,36 +25,60 @@
             </div>
         </div>
     </header>
+    <div style="padding:4px 0;background:rgba(255,200,0,0.08);border-bottom:1px solid rgba(255,200,0,0.15);text-align:center;font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:0.3px">
+        EXPERIMENTAL &mdash; Not Financial Advice &middot; DYOR &middot; Use at your own risk
+    </div>
+    <div id="trainingBanner" style="display:none;padding:6px 0;background:rgba(34,211,238,0.08);border-bottom:1px solid rgba(34,211,238,0.15);text-align:center;font-family:var(--font-sans);font-size:11px;color:#22d3ee;letter-spacing:0.5px">
+        &#x1f9ea; TRAINING MODE &mdash; Simulating trades, no real money at risk. Feeding RAG pattern store.
+    </div>
 
     <div class="container">
+        <!-- Stats Date Filter -->
+        <div class="stats-date-filter">
+            <span class="stats-filter-label">Periodo:</span>
+            <button class="chart-filter-btn active" data-stats="all">All</button>
+            <button class="chart-filter-btn" data-stats="today">Hoy</button>
+            <button class="chart-filter-btn" data-stats="custom">Custom</button>
+            <input type="date" class="stats-date-input" id="statsDateInput" style="display:none">
+        </div>
         <!-- Stat Cards -->
         <div class="grid grid-4">
-            <div class="card stat-card glow-accent">
-                <div class="card-header">Bankroll</div>
-                <div class="card-value" id="bankroll">$0.00</div>
-                <div class="card-sub" id="bankrollChange"></div>
-                <div class="card-sub" id="walletBalance" style="opacity:0.6"></div>
-            </div>
             <div class="card stat-card glow-green">
+                <div class="card-header">Wallet Real</div>
+                <div class="card-value" id="walletTotal">&mdash;</div>
+                <div class="card-sub" id="walletDeposit"></div>
+            </div>
+            <div class="card stat-card glow-accent">
                 <div class="card-header">Today P&amp;L</div>
                 <div class="card-value" id="dailyPnl">$0.00</div>
                 <div class="card-sub" id="dailyPnlPct"></div>
+                <div class="card-sub" id="dailyFees" style="opacity:0.6"></div>
             </div>
             <div class="card stat-card glow-blue">
+                <div class="card-header">Net Profit</div>
+                <div class="card-value" id="netProfit">&mdash;</div>
+                <div class="card-sub" id="netProfitSub"></div>
+            </div>
+            <div class="card stat-card glow-accent">
                 <div class="card-header">Win Rate</div>
                 <div class="card-value" id="winRate">&mdash;</div>
                 <div class="card-sub" id="winRateSub"></div>
-            </div>
-            <div class="card stat-card glow-accent">
-                <div class="card-header">Trades</div>
-                <div class="card-value" id="tradesToday">0</div>
-                <div class="card-sub" id="totalTrades"></div>
             </div>
         </div>
 
         <!-- Equity Curve -->
         <div class="card" style="margin-bottom: 20px">
-            <div class="card-header">Equity Curve</div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="card-header" style="margin:0">Equity Curve</div>
+                <div class="chart-filters" id="chartFilters">
+                    <button class="chart-filter-btn" data-range="1h">1H</button>
+                    <button class="chart-filter-btn" data-range="6h">6H</button>
+                    <button class="chart-filter-btn" data-range="1d">1D</button>
+                    <button class="chart-filter-btn active" data-range="7d">7D</button>
+                    <button class="chart-filter-btn" data-range="30d">30D</button>
+                    <button class="chart-filter-btn" data-range="all">ALL</button>
+                </div>
+            </div>
             <div class="chart-container">
                 <canvas id="equityChart"></canvas>
             </div>
@@ -71,9 +95,16 @@
         <!-- Trades + Signals/Risk -->
         <div class="grid grid-2">
             <!-- Live Trades -->
-            <div class="card">
-                <div class="card-header">Live Trades</div>
-                <div class="table-wrap">
+            <div class="card" style="display:flex;flex-direction:column">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div class="card-header" style="margin:0">Trades</div>
+                    <div class="chart-filters" id="modeFilters">
+                        <button class="chart-filter-btn active" data-mode="all">All</button>
+                        <button class="chart-filter-btn" data-mode="paper">Paper</button>
+                        <button class="chart-filter-btn" data-mode="live">Live</button>
+                    </div>
+                </div>
+                <div class="table-wrap" style="flex:1;min-height:0">
                     <table>
                         <thead>
                             <tr>
@@ -131,27 +162,11 @@
                         </div>
                         <div class="signal-bar">
                             <div class="signal-label-wrap">
-                                <span class="signal-label">Fair Value</span>
-                                <span class="signal-desc">Diferencia entre precio justo estimado y precio actual</span>
+                                <span class="signal-label">RSI</span>
+                                <span class="signal-desc">Fuerza relativa: sobrecompra/sobreventa de BTC</span>
                             </div>
-                            <div class="signal-track"><div class="signal-fill" id="sigFV"></div></div>
-                            <span class="signal-value" id="sigFVVal">&mdash;</span>
-                        </div>
-                        <div class="signal-bar">
-                            <div class="signal-label-wrap">
-                                <span class="signal-label">RAG</span>
-                                <span class="signal-desc">Patrones históricos similares al momento actual</span>
-                            </div>
-                            <div class="signal-track"><div class="signal-fill" id="sigRAG"></div></div>
-                            <span class="signal-value" id="sigRAGVal">&mdash;</span>
-                        </div>
-                        <div class="signal-bar">
-                            <div class="signal-label-wrap">
-                                <span class="signal-label">Sentiment</span>
-                                <span class="signal-desc">Sentimiento de noticias sobre Bitcoin</span>
-                            </div>
-                            <div class="signal-track"><div class="signal-fill" id="sigSent"></div></div>
-                            <span class="signal-value" id="sigSentVal">&mdash;</span>
+                            <div class="signal-track"><div class="signal-fill" id="sigRSI"></div></div>
+                            <span class="signal-value" id="sigRSIVal">&mdash;</span>
                         </div>
                     </div>
                 </div>
@@ -216,6 +231,11 @@
         </div>
     </div>
 
-    <script src="/static/dashboard.js?v=8"></script>
+    <div style="margin:24px auto 16px;text-align:center;font-family:var(--font-sans);font-size:11px;color:var(--text-dim)">
+        <a href="/about" style="color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(139,92,246,0.3)">About this experiment</a>
+        &nbsp;&middot;&nbsp; NFA &middot; DYOR &middot; Use at your own risk
+    </div>
+
+    <script src="/static/dashboard.js?v=25"></script>
 </body>
 </html>

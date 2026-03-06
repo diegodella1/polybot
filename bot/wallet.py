@@ -21,6 +21,7 @@ POLYGON_RPCS = [
 
 # --- Contract addresses (Polygon mainnet) ---
 USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")  # USDC.e (bridged)
+USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")  # USDC (native)
 USDT = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")  # USDT (PoS)
 CTF_ADDRESS = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")  # ConditionalTokens
 PROXY_WALLET = Web3.to_checksum_address("0x73abf22e40DA48E684f5CC705F5d759A64e0b1E6")  # Polymarket proxy
@@ -110,6 +111,16 @@ CTF_ABI = [
     {
         "inputs": [{"name": "conditionId", "type": "bytes32"}],
         "name": "payoutDenominator",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "outcomeIndex", "type": "uint256"},
+        ],
+        "name": "payoutNumerators",
         "outputs": [{"name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
@@ -218,6 +229,30 @@ def is_condition_resolved(condition_id: str) -> bool:
     return denom > 0
 
 
+def get_winning_outcome(condition_id: str) -> str | None:
+    """Check which outcome won for a resolved binary market.
+
+    Returns 'up' if outcome 0 won, 'down' if outcome 1 won, None if unresolved.
+    Binary markets: outcome 0 = Up/Yes, outcome 1 = Down/No.
+    """
+    w3 = _get_w3()
+    ctf = w3.eth.contract(address=CTF_ADDRESS, abi=CTF_ABI)
+    cid_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+
+    denom = ctf.functions.payoutDenominator(cid_bytes).call()
+    if denom == 0:
+        return None  # Not yet resolved
+
+    num_0 = ctf.functions.payoutNumerators(cid_bytes, 0).call()
+    num_1 = ctf.functions.payoutNumerators(cid_bytes, 1).call()
+
+    if num_0 > 0:
+        return "up"
+    elif num_1 > 0:
+        return "down"
+    return None
+
+
 def get_position_id(condition_id: str, index_set: int) -> int:
     """Compute position ID by calling getCollectionId on-chain + keccak256.
 
@@ -248,11 +283,13 @@ def scan_redeemable_tokens() -> list[dict]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    # Get winning trades grouped by condition_id + side
+    # Only scan recent winning trades (last 48h) — older ones are already redeemed
     rows = conn.execute(
         """SELECT condition_id, side, token_id, GROUP_CONCAT(id) as trade_ids
            FROM trades
-           WHERE outcome IN ('win', 'take_profit')
+           WHERE outcome = 'win'
+             AND condition_id IS NOT NULL AND token_id IS NOT NULL
+             AND created_at > datetime('now', '-48 hours')
            GROUP BY condition_id, side"""
     ).fetchall()
     conn.close()
@@ -266,11 +303,9 @@ def scan_redeemable_tokens() -> list[dict]:
         side = row["side"]
 
         try:
-            # Compute position ID on-chain
             index_set = 1 if side == "up" else 2
             pos_id = get_position_id(condition_id, index_set)
 
-            # Check balance
             balance_raw = ctf.functions.balanceOf(account.address, pos_id).call()
             if balance_raw > 0:
                 balance = balance_raw / 1e6
@@ -507,6 +542,115 @@ def _swap_usdt_sync(amount_usd: float | None = None) -> WalletResult:
         new_balance = usdc.functions.balanceOf(account.address).call() / 1e6
         logger.info(
             "Swap OK: $%.2f USDT → USDC.e | tx=%s | new USDC.e balance=$%.2f",
+            amount_usd, hex_hash, new_balance,
+        )
+        return WalletResult(
+            success=True, tx_hash=hex_hash,
+            details={"amount_in": amount_usd, "usdc_balance": new_balance},
+        )
+    else:
+        logger.error("Swap reverted: %s", hex_hash)
+        return WalletResult(success=False, tx_hash=hex_hash, error="Swap transaction reverted")
+
+
+def get_usdc_native_balance() -> float:
+    """Get USDC native balance of EOA wallet on Polygon."""
+    w3, account = _get_account()
+    usdc = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
+    return usdc.functions.balanceOf(account.address).call() / 1e6
+
+
+async def swap_usdc_to_usdce(amount_usd: float | None = None) -> WalletResult:
+    """Swap USDC native → USDC.e via Uniswap V3 on Polygon."""
+    try:
+        result = await asyncio.to_thread(_swap_usdc_native_sync, amount_usd)
+        return result
+    except Exception as e:
+        logger.error("Swap USDC→USDC.e failed: %s", e)
+        return WalletResult(success=False, error=str(e))
+
+
+def _swap_usdc_native_sync(amount_usd: float | None = None) -> WalletResult:
+    """Synchronous USDC native → USDC.e swap via Uniswap V3."""
+    import time
+
+    w3, account = _get_account()
+    usdc_native = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
+
+    balance_raw = usdc_native.functions.balanceOf(account.address).call()
+    balance = balance_raw / 1e6
+
+    if balance < 0.01:
+        return WalletResult(success=False, error=f"No USDC native to swap (balance: ${balance:.2f})")
+
+    if amount_usd is None:
+        amount_raw = balance_raw
+        amount_usd = balance
+    else:
+        amount_raw = int(amount_usd * 1e6)
+        if amount_raw > balance_raw:
+            return WalletResult(
+                success=False,
+                error=f"Insufficient USDC: ${balance:.2f} < ${amount_usd:.2f}",
+            )
+
+    logger.info("Swapping $%.2f USDC native → USDC.e via Uniswap V3", amount_usd)
+
+    # Approve router
+    allowance = usdc_native.functions.allowance(account.address, UNISWAP_V3_ROUTER).call()
+    if allowance < amount_raw:
+        logger.info("Approving USDC native spend for Uniswap router...")
+        approve_tx = usdc_native.functions.approve(
+            UNISWAP_V3_ROUTER, 2**256 - 1
+        ).build_transaction({
+            "from": account.address,
+            "nonce": w3.eth.get_transaction_count(account.address),
+            "gas": 60_000,
+            "maxFeePerGas": w3.eth.gas_price * 2,
+            "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+            "chainId": 137,
+        })
+        signed = account.sign_transaction(approve_tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        if receipt["status"] != 1:
+            return WalletResult(success=False, tx_hash=tx_hash.hex(), error="USDC approve reverted")
+        logger.info("USDC native approved: tx=%s", tx_hash.hex())
+
+    # Swap via exactInputSingle
+    router = w3.eth.contract(address=UNISWAP_V3_ROUTER, abi=UNISWAP_V3_ROUTER_ABI)
+    min_out = int(amount_raw * 0.997)  # 0.3% slippage
+
+    swap_params = (
+        USDC_NATIVE,                    # tokenIn
+        USDC_E,                         # tokenOut
+        100,                            # fee (0.01%)
+        account.address,                # recipient
+        int(time.time()) + 300,         # deadline
+        amount_raw,                     # amountIn
+        min_out,                        # amountOutMinimum
+        0,                              # sqrtPriceLimitX96
+    )
+
+    swap_tx = router.functions.exactInputSingle(swap_params).build_transaction({
+        "from": account.address,
+        "nonce": w3.eth.get_transaction_count(account.address),
+        "gas": 200_000,
+        "maxFeePerGas": w3.eth.gas_price * 2,
+        "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+        "chainId": 137,
+    })
+
+    signed = account.sign_transaction(swap_tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+    hex_hash = tx_hash.hex()
+    if receipt["status"] == 1:
+        usdc_e = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
+        new_balance = usdc_e.functions.balanceOf(account.address).call() / 1e6
+        logger.info(
+            "Swap OK: $%.2f USDC → USDC.e | tx=%s | new USDC.e balance=$%.2f",
             amount_usd, hex_hash, new_balance,
         )
         return WalletResult(

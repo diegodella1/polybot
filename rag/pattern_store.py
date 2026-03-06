@@ -107,6 +107,19 @@ class PatternStore:
         signal = (win_ratio - 0.5) * 2.0
         return max(-1.0, min(1.0, signal))
 
+    async def clear(self):
+        """Purge all patterns from DB and in-memory cache."""
+        db = await get_db()
+        try:
+            await db.execute("DELETE FROM patterns")
+            await db.commit()
+        finally:
+            await db.close()
+        self._matrix = None
+        self._outcomes = []
+        self._norms = None
+        logger.info("All RAG patterns purged")
+
     @property
     def pattern_count(self) -> int:
         return len(self._outcomes)

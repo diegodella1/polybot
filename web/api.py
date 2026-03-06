@@ -3,15 +3,24 @@
 import asyncio
 import logging
 import os
+import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import JSONResponse
 from bot.config import load_config, save_config
 from bot.state import state
 from db import get_db
-from web.auth import verify_password, create_session, check_session, delete_session
+from web.auth import (
+    verify_password, create_session, check_session, delete_session,
+    check_rate_limit, record_failed_attempt, clear_attempts,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _audit(request: Request, action: str, details: str = ""):
+    ip = request.client.host if request.client else "unknown"
+    logger.warning("AUDIT [%s] %s %s", ip, action, details)
 
 
 def _require_admin(request: Request):
@@ -27,10 +36,16 @@ def create_router(engine, ws_manager) -> APIRouter:
 
     @router.post("/auth/login")
     async def login(request: Request):
+        ip = request.client.host if request.client else "unknown"
+        if check_rate_limit(ip):
+            raise HTTPException(status_code=429, detail="Too many login attempts. Try again in 5 minutes.")
         body = await request.json()
         password = body.get("password", "")
         if not verify_password(password):
+            record_failed_attempt(ip)
             raise HTTPException(status_code=401, detail="Wrong password")
+        clear_attempts(ip)
+        _audit(request, "LOGIN_SUCCESS")
         response = JSONResponse({"status": "ok"})
         create_session(response)
         return response
@@ -52,12 +67,12 @@ def create_router(engine, ws_manager) -> APIRouter:
         return await engine.get_status()
 
     @router.get("/trades")
-    async def get_trades(limit: int = 50, offset: int = 0):
+    async def get_trades(limit: int = 50, offset: int = 0, mode: str = "all"):
         db = await get_db()
         try:
+            where = _mode_filter(mode)
             cursor = await db.execute(
-                """SELECT * FROM trades
-                   ORDER BY id DESC LIMIT ? OFFSET ?""",
+                f"SELECT * FROM trades {where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
             rows = await cursor.fetchall()
@@ -79,18 +94,19 @@ def create_router(engine, ws_manager) -> APIRouter:
             await db.close()
 
     @router.get("/stats/summary")
-    async def get_summary():
+    async def get_summary(mode: str = "all"):
         db = await get_db()
         try:
+            mode_cond = _mode_filter(mode, prefix="AND")
             cursor = await db.execute(
-                """SELECT
+                f"""SELECT
                     COUNT(*) as total_trades,
-                    SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN outcome IN ('win','take_profit') THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN outcome IN ('loss','stop_loss') THEN 1 ELSE 0 END) as losses,
                     COALESCE(SUM(pnl), 0) as total_pnl,
                     COALESCE(MAX(pnl), 0) as best_trade,
                     COALESCE(MIN(pnl), 0) as worst_trade
-                FROM trades WHERE outcome IS NOT NULL"""
+                FROM trades WHERE outcome IS NOT NULL {mode_cond}"""
             )
             row = await cursor.fetchone()
             data = dict(row)
@@ -134,6 +150,15 @@ def create_router(engine, ws_manager) -> APIRouter:
         finally:
             await db.close()
 
+    @router.post("/rag/purge")
+    async def purge_rag(request: Request):
+        """Purge all RAG patterns."""
+        _require_admin(request)
+        if engine.pattern_store is not None:
+            await engine.pattern_store.clear()
+            return {"status": "ok", "message": "All patterns purged"}
+        return {"status": "ok", "message": "No pattern store"}
+
     # --- Admin-only endpoints (require login) ---
 
     @router.get("/config")
@@ -145,12 +170,14 @@ def create_router(engine, ws_manager) -> APIRouter:
     async def update_config(request: Request):
         _require_admin(request)
         data = await request.json()
+        _audit(request, "CONFIG_UPDATE", f"keys={list(data.keys())}")
         save_config(data)
         return {"status": "ok"}
 
     @router.post("/bot/start")
     async def start_bot(request: Request):
         _require_admin(request)
+        _audit(request, "BOT_START")
         import asyncio
         await state.set("enabled", True)
         if not engine._running:
@@ -160,6 +187,7 @@ def create_router(engine, ws_manager) -> APIRouter:
     @router.post("/bot/stop")
     async def stop_bot(request: Request):
         _require_admin(request)
+        _audit(request, "BOT_STOP")
         await engine.stop()
         return {"status": "stopped"}
 
@@ -168,6 +196,7 @@ def create_router(engine, ws_manager) -> APIRouter:
         """Save Polymarket API keys to .env file."""
         _require_admin(request)
         body = await request.json()
+        _audit(request, "KEYS_SAVE")
         _update_env(body)
         # Reload into current process
         for key in ("POLYMARKET_PRIVATE_KEY", "POLYMARKET_API_KEY",
@@ -278,6 +307,7 @@ def create_router(engine, ws_manager) -> APIRouter:
     async def wallet_redeem_all(request: Request):
         """Scan and redeem all winning tokens."""
         _require_admin(request)
+        _audit(request, "WALLET_REDEEM_ALL")
         from bot.wallet import scan_redeemable_tokens, redeem_positions
 
         try:
@@ -318,12 +348,17 @@ def create_router(engine, ws_manager) -> APIRouter:
         address = body.get("address", "").strip()
         amount = body.get("amount")
 
-        if not address:
-            raise HTTPException(400, "Address required")
-        if not amount or float(amount) <= 0:
-            raise HTTPException(400, "Valid amount required")
+        if not address or not re.match(r'^0x[0-9a-fA-F]{40}$', address):
+            raise HTTPException(400, "Invalid Ethereum address format")
+        try:
+            amount_f = float(amount)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid amount")
+        if amount_f <= 0 or amount_f > 1000:
+            raise HTTPException(400, "Amount must be between 0 and $1000")
 
-        result = await transfer_usdc(address, float(amount))
+        _audit(request, "WALLET_SEND", f"to={address} amount=${amount_f:.2f}")
+        result = await transfer_usdc(address, amount_f)
         if not result.success:
             raise HTTPException(500, result.error)
 
@@ -338,6 +373,7 @@ def create_router(engine, ws_manager) -> APIRouter:
     async def wallet_swap_usdt(request: Request):
         """Swap USDT → USDC.e via Uniswap V3. Optionally specify amount."""
         _require_admin(request)
+        _audit(request, "WALLET_SWAP_USDT")
         from bot.wallet import swap_usdt_to_usdce
 
         body = await request.json()
@@ -354,6 +390,15 @@ def create_router(engine, ws_manager) -> APIRouter:
         }
 
     return router
+
+
+def _mode_filter(mode: str, prefix: str = "WHERE") -> str:
+    """Build SQL clause to filter trades by dry_run mode."""
+    if mode == "paper":
+        return f"{prefix} dry_run = 1"
+    elif mode == "live":
+        return f"{prefix} dry_run = 0"
+    return ""  # 'all' — no filter
 
 
 def _update_env(data: dict):

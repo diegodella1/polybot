@@ -29,7 +29,7 @@ _VALIDATORS = {
     "max_entry_price": (0.50, 0.99),
     "stop_loss_pct": (0.05, 0.90),
     "take_profit_pct": (0.05, 2.00),
-    "min_win_rate": (0.30, 0.60),
+    "min_win_rate": (0, 0.60),
     "min_estimated_winrate": (0.50, 0.70),
     "max_estimated_winrate": (0.55, 0.80),
     "trade_cooldown_seconds": (0, 3600),

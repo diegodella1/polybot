@@ -1,64 +1,37 @@
-# === Position sizing ===
-# Conservative: 5% base, 8% max → $1.00-$1.60 per trade on $20 bankroll
-base_trade_pct: 0.05
-max_trade_pct: 0.08
-min_trade_usd: 1
+max_trade_pct: 0.20
+base_trade_pct: 0.07
+min_trade_usd: 2.5
 max_exposure_usd: 5
-
-# === Entry filters ===
-# Only trade cheap contracts (good risk/reward below 0.55)
-min_entry_price: 0.35
-max_entry_price: 0.55
-trade_threshold: 0.20
+daily_loss_limit_pct: 0.5
+daily_profit_target_pct: 0.2
+trade_threshold: 0.10
 max_spread_cents: 5
-min_time_remaining_sec: 40
-
-# === Stop-loss / Take-profit ===
-# Wider SL (binary market bids bounce a lot), faster TP
-stop_loss_pct: 0.15
-take_profit_pct: 0.10
-
-# === Risk management ===
-daily_loss_limit_pct: 0.15
-min_drawdown_multiplier: 0.25
-bankroll_floor_usd: 5.0
-max_consecutive_losses: 3
-cooldown_rounds: 8
+min_time_remaining_sec: 30
+max_time_remaining_sec: 0
+max_consecutive_losses: 5
+cooldown_rounds: 1
 kelly_fraction: 0.5
-
-# === Circuit breaker ===
-# Lower threshold temporarily — old trades (bad config) poison the window
-# Once we have 30+ trades with new config, raise back to 0.40
-min_win_rate: 0.30
+min_entry_price: 0.38
+max_entry_price: 0.65
+stop_loss_pct: 0.15
+take_profit_pct: 1
+trade_cooldown_seconds: 0
+min_win_rate: 0
 circuit_breaker_window: 30
 circuit_breaker_hours: 2
-
-# === Signal weights ===
-# Reduce fair_value (too noisy), boost momentum + book_skew (more reliable)
-# Enable sentiment at 0.05 for directional bias
-weights:
-  momentum: 0.35
-  book_skew: 0.25
-  fair_value: 0.10
-  vol_regime: 0.10
-  rag_pattern: 0.15
-  sentiment: 0.05
-
-# === Estimated win-rate bounds (Kelly input) ===
-min_estimated_winrate: 0.52
-max_estimated_winrate: 0.60
-
-# === Mode ===
+min_drawdown_multiplier: 0.25
+bankroll_floor_usd: 2
+min_estimated_winrate: 0.55
+max_estimated_winrate: 0.6
 dry_run: false
-
-# === Signal adjustments ===
-# Invert UP signals to DOWN (model predicts UP wrong, 9% WR)
-invert_up_signal: true
-# Minimum seconds between trades (prevents burst losses)
-trade_cooldown_seconds: 600
-
-# === Misc ===
-daily_profit_target_pct: 0.10
-binance_symbol: btcusdt
+use_tp_sl: false
+rag_enabled: true
+invert_up_signal: false
 telegram_enabled: true
 bot_enabled: true
+binance_symbol: btcusdt
+weights:
+  momentum: 0.70
+  book_skew: 0.10
+  rsi: 0.20
+max_signal: 1.0

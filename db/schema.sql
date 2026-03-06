@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl REAL,
     bankroll_after REAL,
     signal_details TEXT,
+    dry_run BOOLEAN DEFAULT 1,
+    order_id TEXT,
+    order_status TEXT DEFAULT 'filled',
     created_at TEXT DEFAULT (datetime('now'))
 );
 

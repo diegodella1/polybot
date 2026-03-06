@@ -24,22 +24,31 @@ def create_app(engine, ws_manager: WebSocketManager) -> FastAPI:
 
     # --- Pages ---
 
-    no_cache = {"Cache-Control": "no-cache, must-revalidate"}
+    _sec_headers = {
+        "Cache-Control": "no-cache, must-revalidate",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+    }
 
     @app.get("/")
     async def dashboard():
         """Public dashboard — no login required."""
-        return FileResponse(os.path.join(static_dir, "index.html"), headers=no_cache)
+        return FileResponse(os.path.join(static_dir, "index.html"), headers=_sec_headers)
 
     @app.get("/login")
     async def login_page():
-        return FileResponse(os.path.join(static_dir, "login.html"), headers=no_cache)
+        return FileResponse(os.path.join(static_dir, "login.html"), headers=_sec_headers)
+
+    @app.get("/about")
+    async def about():
+        return FileResponse(os.path.join(static_dir, "about.html"), headers=_sec_headers)
 
     @app.get("/admin")
     async def admin(request: Request):
         """Admin panel — login required."""
         if not check_session(request):
             return RedirectResponse("/login?next=/admin", status_code=302)
-        return FileResponse(os.path.join(static_dir, "admin.html"), headers=no_cache)
+        return FileResponse(os.path.join(static_dir, "admin.html"), headers=_sec_headers)
 
     return app

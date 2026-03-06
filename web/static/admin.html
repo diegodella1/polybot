@@ -3,13 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Polybot Admin</title>
-    <link rel="stylesheet" href="/static/style.css?v=6">
+    <title>Polybot Mission Control</title>
+    <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
     <header>
         <div class="header-left">
             <h1>POLYBOT</h1>
+            <span style="font-family:var(--font-sans);font-size:10px;color:var(--accent);letter-spacing:1.5px;text-transform:uppercase;font-weight:700">Mission Control</span>
         </div>
         <div class="header-right">
             <a href="/" class="header-link">Dashboard</a>
@@ -22,103 +23,367 @@
     </header>
 
     <div class="container">
-        <!-- Bot Controls -->
-        <div class="btn-group" style="margin-top: 8px">
-            <button class="btn btn-start btn-lg" id="btnStart" onclick="startBot()">
-                &#x25b6; START BOT
-            </button>
-            <button class="btn btn-stop btn-lg" id="btnStop" onclick="stopBot()">
-                &#x25a0; EMERGENCY STOP
-            </button>
+        <!-- ===== STATUS HERO ===== -->
+        <div class="grid grid-4" style="margin-top:8px">
+            <div class="card stat-card glow-green">
+                <div class="card-header">Wallet Real</div>
+                <div class="card-value" id="mcWallet" style="font-size:22px">&mdash;</div>
+                <div class="card-sub" id="mcDeposit"></div>
+            </div>
+            <div class="card stat-card glow-accent">
+                <div class="card-header">Today P&amp;L</div>
+                <div class="card-value" id="mcDailyPnl" style="font-size:22px">$0.00</div>
+                <div class="card-sub" id="mcDailyPct"></div>
+                <div class="card-sub" id="mcDailyFees" style="opacity:0.6"></div>
+            </div>
+            <div class="card stat-card glow-blue">
+                <div class="card-header">Net Profit</div>
+                <div class="card-value" id="mcNetProfit" style="font-size:22px">&mdash;</div>
+                <div class="card-sub" id="mcNetProfitSub"></div>
+            </div>
+            <div class="card stat-card glow-accent">
+                <div class="card-header">Win Rate</div>
+                <div class="card-value" id="mcWinRate" style="font-size:22px">&mdash;</div>
+                <div class="card-sub" id="mcWinRateSub"></div>
+            </div>
         </div>
 
-        <!-- 1. Trading Rules -->
-        <div class="section">
-            <div class="section-header open" onclick="toggleSection(this)">
-                <div class="section-title">
-                    <span class="icon">&#x2699;</span>
-                    Trading Rules
-                </div>
-                <span class="section-chevron">&#x25bc;</span>
+        <!-- ===== CONTROL BAR ===== -->
+        <div style="display:flex;gap:12px;align-items:center;margin:12px 0;flex-wrap:wrap">
+            <button class="btn btn-start" id="btnStart" onclick="startBot()">&#x25b6; START</button>
+            <button class="btn btn-stop" id="btnStop" onclick="stopBot()">&#x25a0; STOP</button>
+            <div id="mcModeBadge" style="padding:5px 14px;border-radius:20px;font-family:var(--font-sans);font-size:11px;font-weight:700;letter-spacing:0.5px;background:var(--surface-3);color:var(--text-dim)">---</div>
+            <div class="btc-ticker" id="mcBtcTicker" style="margin-left:auto">
+                <span>BTC</span>
+                <span class="price" id="mcBtcPrice">&mdash;</span>
             </div>
-            <div class="section-body open">
-                <div class="grid grid-2" style="margin:0; gap: 0">
+        </div>
+
+        <!-- ===== SIGNALS + RISK ===== -->
+        <div class="grid grid-2" style="margin:12px 0">
+            <!-- Live Signals -->
+            <div class="card">
+                <div class="card-header">Live Signals</div>
+                <div class="gauge-wrap" style="padding:8px 0">
+                    <svg class="gauge-svg" viewBox="0 0 120 120" style="width:100px;height:100px">
+                        <circle class="gauge-bg" cx="60" cy="60" r="50" />
+                        <circle class="gauge-fill" id="gaugeFill" cx="60" cy="60" r="50"
+                            stroke-dasharray="314.16" stroke-dashoffset="314.16" />
+                    </svg>
+                    <div class="gauge-label">Composite</div>
+                    <div class="gauge-value" id="gaugeValue" style="font-size:18px">&mdash;</div>
+                </div>
+                <div id="signalsPanel">
+                    <div class="signal-bar">
+                        <div class="signal-label-wrap"><span class="signal-label">Momentum</span></div>
+                        <div class="signal-track"><div class="signal-fill" id="sigMom"></div></div>
+                        <span class="signal-value" id="sigMomVal">&mdash;</span>
+                    </div>
+                    <div class="signal-bar">
+                        <div class="signal-label-wrap"><span class="signal-label">Book Skew</span></div>
+                        <div class="signal-track"><div class="signal-fill" id="sigSkew"></div></div>
+                        <span class="signal-value" id="sigSkewVal">&mdash;</span>
+                    </div>
+                    <div class="signal-bar">
+                        <div class="signal-label-wrap"><span class="signal-label">RSI</span></div>
+                        <div class="signal-track"><div class="signal-fill" id="sigRSI"></div></div>
+                        <span class="signal-value" id="sigRSIVal">&mdash;</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk Status -->
+            <div class="card">
+                <div class="card-header">Risk Status</div>
+                <div id="riskPanel">
+                    <div class="risk-item">
+                        <div class="risk-icon blue">&#x1f4ca;</div>
+                        <div class="risk-info">
+                            <div class="label">Loss Streak</div>
+                            <div class="value" id="riskStreak">0</div>
+                        </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon green">&#x1f4b0;</div>
+                        <div class="risk-info">
+                            <div class="label">Daily Loss</div>
+                            <div class="value" id="riskDailyLoss">$0.00</div>
+                            <div class="progress-bar"><div class="progress-fill" id="riskDailyBar" style="width:0%"></div></div>
+                        </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon green">&#x1f4c9;</div>
+                        <div class="risk-info">
+                            <div class="label">Sizing Mult</div>
+                            <div class="value" id="riskDrawdown">1.00x</div>
+                        </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon yellow">&#x23f1;</div>
+                        <div class="risk-info">
+                            <div class="label">Cooldown</div>
+                            <div class="value" id="riskCooldown">No</div>
+                        </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon green">&#x26a1;</div>
+                        <div class="risk-info">
+                            <div class="label">Circuit Breaker</div>
+                            <div class="value text-green" id="riskCircuit">OK</div>
+                        </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon yellow">&#x1f504;</div>
+                        <div class="risk-info">
+                            <div class="label">Invert UP</div>
+                            <div class="value" id="riskInvert">OFF</div>
+                        </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon blue">&#x23f3;</div>
+                        <div class="risk-info">
+                            <div class="label">Trade CD</div>
+                            <div class="value" id="riskTradeCooldown">0s</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== RECENT TRADES ===== -->
+        <div class="card" style="margin-bottom:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="card-header" style="margin:0">Recent Trades</div>
+                <div class="chart-filters" id="adminModeFilters">
+                    <button class="chart-filter-btn active" data-mode="all">All</button>
+                    <button class="chart-filter-btn" data-mode="paper">Paper</button>
+                    <button class="chart-filter-btn" data-mode="live">Live</button>
+                </div>
+            </div>
+            <div class="table-wrap" style="max-height:320px;margin-top:8px">
+                <table>
+                    <thead><tr>
+                        <th>Time</th>
+                        <th>Signal</th>
+                        <th>Side</th>
+                        <th>Size</th>
+                        <th>Price</th>
+                        <th>BTC</th>
+                        <th>Result</th>
+                    </tr></thead>
+                    <tbody id="adminTradesBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== TRADING RULES ===== -->
+        <div class="admin-section">
+            <div class="admin-section-header">
+                <span class="icon">&#x2699;</span> Trading Rules
+            </div>
+            <div class="admin-section-body">
+                <!-- Entry/Exit -->
+                <div class="subsection-title">Entry &amp; Exit</div>
+                <div class="grid grid-2" style="margin:0;gap:0">
                     <div>
                         <div class="form-group">
-                            <span class="form-label">Max trade (% bankroll)</span>
-                            <input class="form-input" type="number" id="max_trade_pct" step="0.01" value="0.08">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Min trade (USD)</span>
-                            <input class="form-input" type="number" id="min_trade_usd" step="0.5" value="2.0">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Max exposure (USD)</span>
-                            <input class="form-input" type="number" id="max_exposure_usd" step="1" value="15">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Daily loss limit (%)</span>
-                            <input class="form-input" type="number" id="daily_loss_limit_pct" step="0.01" value="0.15">
-                        </div>
-                        <div class="form-group">
                             <span class="form-label">Trade threshold (|S|)</span>
-                            <input class="form-input" type="number" id="trade_threshold" step="0.01" value="0.15">
+                            <input class="form-input" type="number" id="trade_threshold" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Min entry price</span>
+                            <input class="form-input" type="number" id="min_entry_price" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Max entry price</span>
+                            <input class="form-input" type="number" id="max_entry_price" step="0.01">
                         </div>
                     </div>
                     <div>
                         <div class="form-group">
                             <span class="form-label">Max spread (cents)</span>
-                            <input class="form-input" type="number" id="max_spread_cents" step="1" value="5">
+                            <input class="form-input" type="number" id="max_spread_cents" step="1">
                         </div>
                         <div class="form-group">
                             <span class="form-label">Min time remaining (sec)</span>
-                            <input class="form-input" type="number" id="min_time_remaining_sec" step="10" value="90">
+                            <input class="form-input" type="number" id="min_time_remaining_sec" step="10">
                         </div>
                         <div class="form-group">
-                            <span class="form-label">Consecutive loss limit</span>
-                            <input class="form-input" type="number" id="max_consecutive_losses" step="1" value="3">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Cooldown rounds</span>
-                            <input class="form-input" type="number" id="cooldown_rounds" step="1" value="6">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Kelly fraction</span>
-                            <input class="form-input" type="number" id="kelly_fraction" step="0.1" value="0.5">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Min entry price</span>
-                            <input class="form-input" type="number" id="min_entry_price" step="0.01" value="0.25">
-                        </div>
-                        <div class="form-group">
-                            <span class="form-label">Max entry price</span>
-                            <input class="form-input" type="number" id="max_entry_price" step="0.01" value="0.75">
+                            <span class="form-label">Invert UP signal</span>
+                            <select class="form-input" id="invert_up_signal" style="width:110px">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
                         </div>
                     </div>
                 </div>
-                <div class="form-group" style="margin-top: 8px">
-                    <span class="form-label">Dry run mode</span>
-                    <select class="form-input" id="dry_run" style="width: 110px">
-                        <option value="true">Yes</option>
-                        <option value="false">No (LIVE)</option>
-                    </select>
+
+                <hr class="divider" style="margin:16px 0">
+
+                <!-- Stop-Loss / Take-Profit -->
+                <div class="subsection-title">Stop-Loss / Take-Profit</div>
+                <div class="grid grid-2" style="margin:0;gap:0">
+                    <div>
+                        <div class="form-group">
+                            <span class="form-label">TP/SL enabled</span>
+                            <select class="form-input" id="use_tp_sl" style="width:110px">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="form-group">
+                            <span class="form-label">Stop-loss (%)</span>
+                            <input class="form-input" type="number" id="stop_loss_pct" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Take-profit (%)</span>
+                            <input class="form-input" type="number" id="take_profit_pct" step="0.01">
+                        </div>
+                    </div>
                 </div>
-                <div style="margin-top: 16px">
+
+                <hr class="divider" style="margin:16px 0">
+
+                <!-- Position Sizing -->
+                <div class="subsection-title">Position Sizing</div>
+                <div class="grid grid-2" style="margin:0;gap:0">
+                    <div>
+                        <div class="form-group">
+                            <span class="form-label">Max trade (% bankroll)</span>
+                            <input class="form-input" type="number" id="max_trade_pct" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Base trade (%)</span>
+                            <input class="form-input" type="number" id="base_trade_pct" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Min trade (USD)</span>
+                            <input class="form-input" type="number" id="min_trade_usd" step="0.5">
+                        </div>
+                    </div>
+                    <div>
+                        <div class="form-group">
+                            <span class="form-label">Max exposure (USD)</span>
+                            <input class="form-input" type="number" id="max_exposure_usd" step="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Kelly fraction</span>
+                            <input class="form-input" type="number" id="kelly_fraction" step="0.1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Min drawdown mult</span>
+                            <input class="form-input" type="number" id="min_drawdown_multiplier" step="0.05">
+                        </div>
+                    </div>
+                </div>
+
+                <hr class="divider" style="margin:16px 0">
+
+                <!-- Risk Management -->
+                <div class="subsection-title">Risk Management</div>
+                <div class="grid grid-2" style="margin:0;gap:0">
+                    <div>
+                        <div class="form-group">
+                            <span class="form-label">Daily loss limit (%)</span>
+                            <input class="form-input" type="number" id="daily_loss_limit_pct" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Daily profit target (%)</span>
+                            <input class="form-input" type="number" id="daily_profit_target_pct" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Bankroll floor (USD)</span>
+                            <input class="form-input" type="number" id="bankroll_floor_usd" step="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Consecutive loss limit</span>
+                            <input class="form-input" type="number" id="max_consecutive_losses" step="1">
+                        </div>
+                    </div>
+                    <div>
+                        <div class="form-group">
+                            <span class="form-label">Cooldown rounds</span>
+                            <input class="form-input" type="number" id="cooldown_rounds" step="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Trade cooldown (sec)</span>
+                            <input class="form-input" type="number" id="trade_cooldown_seconds" step="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">CB window (trades)</span>
+                            <input class="form-input" type="number" id="circuit_breaker_window" step="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">CB cooldown (hours)</span>
+                            <input class="form-input" type="number" id="circuit_breaker_hours" step="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">CB min win rate</span>
+                            <input class="form-input" type="number" id="min_win_rate" step="0.01" min="0" max="1">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Min est. winrate</span>
+                            <input class="form-input" type="number" id="min_estimated_winrate" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <span class="form-label">Max est. winrate</span>
+                            <input class="form-input" type="number" id="max_estimated_winrate" step="0.01">
+                        </div>
+                    </div>
+                </div>
+
+                <hr class="divider" style="margin:16px 0">
+
+                <!-- Mode & Features -->
+                <div class="subsection-title">Mode &amp; Features</div>
+                <div class="grid grid-3" style="margin:0;gap:0">
+                    <div class="form-group">
+                        <span class="form-label">Dry run</span>
+                        <select class="form-input" id="dry_run" style="width:110px">
+                            <option value="true">Yes</option>
+                            <option value="false">No (LIVE)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">Bot enabled</span>
+                        <select class="form-input" id="bot_enabled" style="width:110px">
+                            <option value="true">Yes</option>
+                            <option value="false">No</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">RAG enabled</span>
+                        <select class="form-input" id="rag_enabled" style="width:110px">
+                            <option value="true">Yes</option>
+                            <option value="false">No</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">Telegram enabled</span>
+                        <select class="form-input" id="telegram_enabled" style="width:110px">
+                            <option value="true">Yes</option>
+                            <option value="false">No</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">Binance symbol</span>
+                        <input class="form-input" type="text" id="binance_symbol" style="width:110px;text-transform:lowercase">
+                    </div>
+                </div>
+                <div style="margin-top:16px">
                     <button class="btn btn-save" onclick="saveConfig()">SAVE CONFIG</button>
                 </div>
             </div>
         </div>
 
-        <!-- 2. Signal Weights -->
-        <div class="section">
-            <div class="section-header" onclick="toggleSection(this)">
-                <div class="section-title">
-                    <span class="icon">&#x2696;</span>
-                    Signal Weights
-                </div>
-                <span class="section-chevron">&#x25bc;</span>
+        <!-- ===== SIGNAL WEIGHTS ===== -->
+        <div class="admin-section">
+            <div class="admin-section-header">
+                <span class="icon">&#x2696;</span> Signal Weights
             </div>
-            <div class="section-body">
+            <div class="admin-section-body">
                 <div class="weight-slider">
                     <label>Momentum</label>
                     <input type="range" min="0" max="0.5" step="0.05" id="w_momentum" value="0.30">
@@ -130,80 +395,26 @@
                     <span class="weight-val" id="wv_book_skew">0.20</span>
                 </div>
                 <div class="weight-slider">
-                    <label>Fair Value</label>
-                    <input type="range" min="0" max="0.5" step="0.05" id="w_fair_value" value="0.20">
-                    <span class="weight-val" id="wv_fair_value">0.20</span>
-                </div>
-                <div class="weight-slider">
-                    <label>Vol Regime</label>
-                    <input type="range" min="0" max="0.5" step="0.05" id="w_vol_regime" value="0.15">
-                    <span class="weight-val" id="wv_vol_regime">0.15</span>
-                </div>
-                <div class="weight-slider">
-                    <label>RAG Pattern</label>
-                    <input type="range" min="0" max="0.5" step="0.05" id="w_rag_pattern" value="0.10">
-                    <span class="weight-val" id="wv_rag_pattern">0.10</span>
-                </div>
-                <div class="weight-slider">
-                    <label>Sentiment</label>
-                    <input type="range" min="0" max="0.5" step="0.05" id="w_sentiment" value="0.05">
-                    <span class="weight-val" id="wv_sentiment">0.05</span>
+                    <label>RSI</label>
+                    <input type="range" min="0" max="0.5" step="0.05" id="w_rsi" value="0.15">
+                    <span class="weight-val" id="wv_rsi">0.15</span>
                 </div>
                 <div class="weight-sum-bar">
-                    <div class="weight-sum-fill" id="weightSumFill" style="width: 100%"></div>
+                    <div class="weight-sum-fill" id="weightSumFill" style="width:100%"></div>
                 </div>
                 <div class="weight-sum-label valid" id="weightSumLabel">Sum: 1.00</div>
-                <div style="margin-top: 16px">
+                <div style="margin-top:16px">
                     <button class="btn btn-save" onclick="saveConfig()">SAVE CONFIG</button>
                 </div>
             </div>
         </div>
 
-        <!-- 3. API Keys -->
-        <div class="section">
-            <div class="section-header" onclick="toggleSection(this)">
-                <div class="section-title">
-                    <span class="icon">&#x1f511;</span>
-                    API Keys
-                </div>
-                <span class="section-chevron">&#x25bc;</span>
+        <!-- ===== WALLET ===== -->
+        <div class="admin-section">
+            <div class="admin-section-header">
+                <span class="icon">&#x1f4b0;</span> Wallet Management
             </div>
-            <div class="section-body">
-                <div id="credsStatus" style="font-family:var(--font-sans);font-size:12px;margin-bottom:16px;color:var(--text-dim)"></div>
-                <div class="form-group">
-                    <span class="form-label">Private Key</span>
-                    <input class="form-input form-input-wide" type="password" id="pk" placeholder="0x...">
-                </div>
-                <div class="form-group">
-                    <span class="form-label">API Key</span>
-                    <input class="form-input form-input-wide" type="password" id="api_key" placeholder="">
-                </div>
-                <div class="form-group">
-                    <span class="form-label">API Secret</span>
-                    <input class="form-input form-input-wide" type="password" id="api_secret" placeholder="">
-                </div>
-                <div class="form-group">
-                    <span class="form-label">API Passphrase</span>
-                    <input class="form-input form-input-wide" type="password" id="api_passphrase" placeholder="">
-                </div>
-                <div class="btn-group" style="margin-top: 16px">
-                    <button class="btn btn-blue" onclick="deriveKeys()">DERIVE FROM PK</button>
-                    <button class="btn btn-save" onclick="saveKeys()">SAVE API KEYS</button>
-                    <button class="btn btn-secondary" onclick="checkBalance()">CHECK BALANCE</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- 4. Wallet Management -->
-        <div class="section">
-            <div class="section-header" onclick="toggleSection(this)">
-                <div class="section-title">
-                    <span class="icon">&#x1f4b0;</span>
-                    Wallet Management
-                </div>
-                <span class="section-chevron">&#x25bc;</span>
-            </div>
-            <div class="section-body">
+            <div class="admin-section-body">
                 <div class="grid grid-4" style="margin:0">
                     <div class="card stat-card glow-blue" style="text-align:center">
                         <div class="card-header">Exchange USDC</div>
@@ -218,88 +429,120 @@
                         <div class="card-value" id="walletUsdt" style="font-size:18px">&mdash;</div>
                     </div>
                     <div class="card stat-card glow-accent" style="text-align:center">
-                        <div class="card-header">Unredeemed Tokens</div>
+                        <div class="card-header">Unredeemed</div>
                         <div class="card-value" id="walletUnredeemed" style="font-size:18px">&mdash;</div>
                     </div>
                 </div>
                 <div style="font-family:var(--font-sans);font-size:12px;color:var(--text-dim);margin-top:8px" id="walletMatic"></div>
-
                 <div class="btn-group" style="margin-top:16px">
                     <button class="btn btn-save" onclick="redeemAll()">REDEEM ALL TOKENS</button>
                     <button class="btn btn-blue" onclick="swapUsdt()">SWAP USDT &rarr; USDC.e</button>
-                    <button class="btn btn-secondary" onclick="loadWalletBalances()">REFRESH BALANCES</button>
+                    <button class="btn btn-secondary" onclick="loadWalletBalances()">REFRESH</button>
                 </div>
                 <div id="redeemStatus" style="font-family:var(--font-sans);font-size:12px;color:var(--text-dim);margin-top:8px"></div>
-
-                <div style="margin-top:20px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.06)">
-                    <div style="font-family:var(--font-sans);font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:12px">Send USDC.e</div>
+                <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+                    <div style="font-family:var(--font-sans);font-size:13px;font-weight:600;margin-bottom:12px">Send USDC.e</div>
                     <div class="form-group">
-                        <span class="form-label">Destination Address</span>
+                        <span class="form-label">Destination</span>
                         <input class="form-input form-input-wide" type="text" id="sendAddress" placeholder="0x...">
                     </div>
                     <div class="form-group">
                         <span class="form-label">Amount (USD)</span>
-                        <input class="form-input" type="number" id="sendAmount" step="0.01" min="0.01" placeholder="0.00" style="width:140px">
+                        <input class="form-input" type="number" id="sendAmount" step="0.01" min="0.01" style="width:140px">
                     </div>
                     <button class="btn btn-stop" onclick="sendUsdc()" style="margin-top:8px">SEND USDC.e</button>
                 </div>
             </div>
         </div>
 
-        <!-- 5. Telegram -->
-        <div class="section">
-            <div class="section-header" onclick="toggleSection(this)">
-                <div class="section-title">
-                    <span class="icon">&#x1f4e8;</span>
-                    Telegram
-                </div>
-                <span class="section-chevron">&#x25bc;</span>
+        <!-- ===== SETTINGS (API Keys + Telegram + Stats & RAG) ===== -->
+        <div class="admin-section">
+            <div class="admin-section-header">
+                <span class="icon">&#x2699;</span> Settings
             </div>
-            <div class="section-body">
-                <div class="form-group">
-                    <span class="form-label">Bot Token</span>
-                    <input class="form-input form-input-wide" type="password" id="tg_token" placeholder="">
+            <div class="admin-section-body" style="padding-top:0">
+                <!-- Tabs -->
+                <div class="settings-tabs">
+                    <button class="settings-tab active" data-tab="tab-keys" onclick="switchTab(this)">API Keys</button>
+                    <button class="settings-tab" data-tab="tab-telegram" onclick="switchTab(this)">Telegram</button>
+                    <button class="settings-tab" data-tab="tab-stats" onclick="switchTab(this)">Stats &amp; RAG</button>
                 </div>
-                <div class="form-group">
-                    <span class="form-label">Chat ID</span>
-                    <input class="form-input form-input-wide" type="text" id="tg_chat_id" placeholder="">
-                </div>
-                <div style="margin-top: 16px">
-                    <button class="btn btn-save" onclick="saveTelegram()">SAVE TELEGRAM</button>
-                </div>
-            </div>
-        </div>
 
-        <!-- 6. Stats -->
-        <div class="section">
-            <div class="section-header" onclick="toggleSection(this)">
-                <div class="section-title">
-                    <span class="icon">&#x1f4ca;</span>
-                    Stats Summary
+                <!-- Tab: API Keys -->
+                <div class="settings-tab-content active" id="tab-keys">
+                    <div id="credsStatus" style="font-family:var(--font-sans);font-size:12px;margin-bottom:16px;color:var(--text-dim)"></div>
+                    <div class="form-group">
+                        <span class="form-label">Private Key</span>
+                        <input class="form-input form-input-wide" type="password" id="pk" placeholder="0x...">
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">API Key</span>
+                        <input class="form-input form-input-wide" type="password" id="api_key">
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">API Secret</span>
+                        <input class="form-input form-input-wide" type="password" id="api_secret">
+                    </div>
+                    <div class="form-group">
+                        <span class="form-label">API Passphrase</span>
+                        <input class="form-input form-input-wide" type="password" id="api_passphrase">
+                    </div>
+                    <div class="btn-group" style="margin-top:16px">
+                        <button class="btn btn-blue" onclick="deriveKeys()">DERIVE FROM PK</button>
+                        <button class="btn btn-save" onclick="saveKeys()">SAVE API KEYS</button>
+                        <button class="btn btn-secondary" onclick="checkBalance()">CHECK BALANCE</button>
+                    </div>
                 </div>
-                <span class="section-chevron">&#x25bc;</span>
-            </div>
-            <div class="section-body">
-                <div class="grid grid-3" style="margin: 0">
-                    <div class="card stat-card glow-accent" style="text-align:center">
-                        <div class="card-header">Total Trades</div>
-                        <div class="card-value" id="statTotal" style="font-size:20px">0</div>
+
+                <!-- Tab: Telegram -->
+                <div class="settings-tab-content" id="tab-telegram">
+                    <div class="form-group">
+                        <span class="form-label">Bot Token</span>
+                        <input class="form-input form-input-wide" type="password" id="tg_token">
                     </div>
-                    <div class="card stat-card glow-blue" style="text-align:center">
-                        <div class="card-header">Win Rate</div>
-                        <div class="card-value" id="statWinRate" style="font-size:20px">&mdash;</div>
+                    <div class="form-group">
+                        <span class="form-label">Chat ID</span>
+                        <input class="form-input form-input-wide" type="text" id="tg_chat_id">
                     </div>
-                    <div class="card stat-card glow-green" style="text-align:center">
-                        <div class="card-header">Total P&amp;L</div>
-                        <div class="card-value" id="statPnl" style="font-size:20px">$0</div>
+                    <div style="margin-top:16px">
+                        <button class="btn btn-save" onclick="saveTelegram()">SAVE TELEGRAM</button>
+                    </div>
+                </div>
+
+                <!-- Tab: Stats & RAG -->
+                <div class="settings-tab-content" id="tab-stats">
+                    <div class="grid grid-3" style="margin:0">
+                        <div class="card stat-card glow-accent" style="text-align:center">
+                            <div class="card-header">Total Trades</div>
+                            <div class="card-value" id="statTotal" style="font-size:20px">0</div>
+                        </div>
+                        <div class="card stat-card glow-blue" style="text-align:center">
+                            <div class="card-header">Win Rate</div>
+                            <div class="card-value" id="statWinRate" style="font-size:20px">&mdash;</div>
+                        </div>
+                        <div class="card stat-card glow-green" style="text-align:center">
+                            <div class="card-header">Total P&amp;L</div>
+                            <div class="card-value" id="statPnl" style="font-size:20px">$0</div>
+                        </div>
+                    </div>
+                    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+                        <div style="font-family:var(--font-sans);font-size:12px;color:var(--text-dim);margin-bottom:8px">
+                            RAG Patterns: <span id="ragPatternCount">?</span>
+                        </div>
+                        <button class="btn btn-stop" onclick="purgeRag()" style="font-size:11px">PURGE RAG PATTERNS</button>
+                        <span id="purgeStatus" style="font-family:var(--font-sans);font-size:11px;color:var(--text-dim);margin-left:8px"></span>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <div class="toast-container" id="toastContainer"></div>
+    <div style="margin:32px auto 16px;max-width:680px;padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.02);font-family:var(--font-sans);font-size:11px;color:var(--text-dim);line-height:1.5;text-align:center">
+        <strong style="color:var(--yellow)">EXPERIMENTAL SOFTWARE</strong> &mdash;
+        Not Financial Advice. DYOR. Use at your own risk.
+    </div>
 
-    <script src="/static/admin.js?v=6"></script>
+    <div class="toast-container" id="toastContainer"></div>
+    <script src="/static/admin.js?v=15"></script>
 </body>
 </html>
