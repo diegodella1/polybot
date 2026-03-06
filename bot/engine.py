@@ -14,6 +14,7 @@ from bot.risk import check_risk, record_outcome, decrement_cooldown, reset_daily
 from bot.sizing import kelly_size
 from bot.executor import execute_trade, exit_position, resolve_trade, update_daily_stats, recover_pending_fills
 from bot.market_discovery import discover_market
+from rag.reflection import maybe_reflect
 from data.binance_ws import BinanceWS
 from data.buffer import PriceBuffer
 from data.polymarket_ws import PolymarketWS
@@ -806,6 +807,19 @@ class TradingEngine:
                 "Resolved: %s pnl=$%.2f bankroll=$%.2f",
                 outcome_label.upper(), pnl, new_bankroll,
             )
+
+            # Periodic reflection (every 50 trades, passive analysis)
+            try:
+                from db import get_db
+                db = await get_db()
+                try:
+                    cursor = await db.execute("SELECT COUNT(*) c FROM trades WHERE outcome IS NOT NULL")
+                    total_trades = (await cursor.fetchone())["c"]
+                finally:
+                    await db.close()
+                await maybe_reflect(total_trades)
+            except Exception as e:
+                logger.debug("Reflection check skipped: %s", e)
 
         except Exception as e:
             logger.error("Background resolution error for trade %d: %s", result.trade_id, e, exc_info=True)
