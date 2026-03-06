@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>About Polybot</title>
-    <link rel="stylesheet" href="/static/style.css?v=6">
+    <link rel="stylesheet" href="/static/style.css?v=12">
 </head>
 <body>
     <header>
@@ -19,50 +19,162 @@
         EXPERIMENTAL &mdash; Not Financial Advice &middot; DYOR &middot; Use at your own risk
     </div>
 
-    <div style="max-width:680px;margin:40px auto;padding:0 20px;font-family:var(--font-sans);color:var(--text-primary);line-height:1.7">
+    <div style="max-width:720px;margin:40px auto;padding:0 20px;font-family:var(--font-sans);color:var(--text-primary);line-height:1.7">
 
-        <h2 style="font-size:22px;font-weight:700;margin-bottom:24px;color:var(--text-primary)">About this experiment</h2>
+        <h2 style="font-size:22px;font-weight:700;margin-bottom:8px;color:var(--text-primary)">About this experiment</h2>
+        <p style="color:var(--text-dim);font-size:13px;margin-bottom:28px;letter-spacing:0.3px">
+            An autonomous trading bot running 24/7 on a Raspberry Pi
+        </p>
 
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
             Polybot is an experimental automated trading bot for
             <a href="https://polymarket.com" target="_blank" style="color:var(--accent);text-decoration:none">Polymarket</a>'s
             BTC Up/Down 5-minute binary markets. It was built as a learning project to explore algorithmic trading,
-            signal processing, and market microstructure in a live environment.
+            signal processing, and market microstructure in a live environment with real money.
         </p>
 
-        <h3 style="font-size:15px;font-weight:600;margin:28px 0 12px;color:var(--text-primary)">What it does</h3>
+        <!-- How it works -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">How it works</h3>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
-            Every 10 seconds, the bot analyzes multiple data sources to decide whether to trade:
+            Every 5 seconds, the bot runs through a full trading cycle:
+        </p>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">
+            <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
+                <div style="font-size:11px;color:var(--accent);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">1. DISCOVER</div>
+                <div style="font-size:12px;color:var(--text-dim)">Finds the current 5-min BTC market on Polymarket and subscribes to its orderbook</div>
+            </div>
+            <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
+                <div style="font-size:11px;color:var(--green);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">2. SIGNAL</div>
+                <div style="font-size:12px;color:var(--text-dim)">Computes a composite score from BTC momentum, orderbook skew, and RSI</div>
+            </div>
+            <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
+                <div style="font-size:11px;color:var(--yellow);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">3. RISK CHECK</div>
+                <div style="font-size:12px;color:var(--text-dim)">Passes through 8 risk gates: loss streaks, exposure limits, circuit breakers</div>
+            </div>
+            <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
+                <div style="font-size:11px;color:var(--blue, #60a5fa);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">4. EXECUTE</div>
+                <div style="font-size:12px;color:var(--text-dim)">Places a limit order on-chain (Polygon), sizes proportionally to signal strength</div>
+            </div>
+        </div>
+
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
+            At market expiration, winning positions automatically redeem $1.00 per share back to USDC.e,
+            creating a self-funding loop. The bot learns from every trade through a k-NN pattern store
+            that feeds historical outcomes back into future decisions.
+        </p>
+
+        <!-- Signal components -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Signal components</h3>
+
+        <table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:24px">
+            <thead>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <th style="text-align:left;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">SIGNAL</th>
+                    <th style="text-align:center;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">WEIGHT</th>
+                    <th style="text-align:left;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">SOURCE</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Momentum</td>
+                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">70%</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">BTC price returns (1m + 5m) and EMA crossover from Binance</td>
+                </tr>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">RSI</td>
+                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">20%</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">14-period Relative Strength Index, overbought/oversold detection</td>
+                </tr>
+                <tr>
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Book Skew</td>
+                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">10%</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">Buy vs sell pressure imbalance on Polymarket's orderbook</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
+            Signals are combined into a composite score in [-1, +1]. Positive = UP, negative = DOWN.
+            The bot only trades when the absolute value exceeds the configured threshold.
+        </p>
+
+        <!-- Risk management -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Risk management</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            Every potential trade passes through 8 sequential risk gates. If any gate fails, the trade is blocked:
         </p>
         <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
-            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">BTC Momentum</strong> &mdash; Real-time price action from Binance klines</li>
-            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Orderbook Skew</strong> &mdash; Buy/sell pressure imbalance on Polymarket</li>
-            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Fair Value</strong> &mdash; Mispricing detection between BTC movement and market odds</li>
-            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Pattern Matching (RAG)</strong> &mdash; k-NN similarity search over historical trade outcomes</li>
-            <li style="margin-bottom:8px"><strong style="color:var(--text-primary)">Sentiment</strong> &mdash; News analysis via LLM (GPT-4o-mini)</li>
+            <li style="margin-bottom:6px">Bankroll floor &mdash; emergency stop below minimum balance</li>
+            <li style="margin-bottom:6px">Consecutive loss cooldown &mdash; pauses after losing streaks</li>
+            <li style="margin-bottom:6px">Circuit breaker &mdash; shuts down if win rate drops too low</li>
+            <li style="margin-bottom:6px">Max exposure &mdash; limits total open position value</li>
+            <li style="margin-bottom:6px">Position guard &mdash; only one position at a time</li>
+            <li style="margin-bottom:6px">Drawdown scaling &mdash; automatically shrinks bet sizes on losing days</li>
         </ul>
 
-        <h3 style="font-size:15px;font-weight:600;margin:28px 0 12px;color:var(--text-primary)">Why it exists</h3>
+        <!-- The market -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">The market</h3>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
-            This is not about making money. The bankroll is intentionally small (~$15 USDC) and the primary
+            Polymarket's BTC 5-minute binary markets are simple:
+        </p>
+        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
+            <li style="margin-bottom:6px">A new market opens every 5 minutes: "Will BTC go Up or Down?"</li>
+            <li style="margin-bottom:6px">Buy UP or DOWN tokens between 0&cent; and 100&cent;</li>
+            <li style="margin-bottom:6px">Winner pays <strong style="color:var(--text-primary)">$1.00/share</strong>, loser pays $0.00</li>
+            <li style="margin-bottom:6px"><strong style="color:var(--text-primary)">10% taker fee</strong> on entry &mdash; no fee on redemption</li>
+            <li style="margin-bottom:6px">Settlement on <strong style="color:var(--text-primary)">Polygon</strong> network in USDC.e</li>
+        </ul>
+
+        <!-- Why it exists -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Why it exists</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            This is not about making money. The bankroll is intentionally small and the primary
             goal is learning: how signals interact, how markets behave at the microstructure level, how to build
             robust automated systems, and how to iterate on strategy through data.
         </p>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
             The bot is constantly evolving &mdash; signals get tuned, risk rules get adjusted, new components
-            get added. Every trade generates data that feeds back into the system (RAG patterns). It's a live
+            get added. Every trade generates data that feeds back into the system. It's a live
             experiment in the truest sense.
         </p>
 
-        <h3 style="font-size:15px;font-weight:600;margin:28px 0 12px;color:var(--text-primary)">How it's built</h3>
-        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
-            <li style="margin-bottom:8px">Python 3.11 + asyncio, FastAPI, SQLite</li>
-            <li style="margin-bottom:8px">Runs on a Raspberry Pi 5 as a systemd service</li>
-            <li style="margin-bottom:8px">Real-time data via Binance and Polymarket WebSockets</li>
-            <li style="margin-bottom:8px">On-chain execution via py-clob-client (Polygon)</li>
-            <li style="margin-bottom:8px">Dashboard you're looking at: vanilla HTML/JS, no framework</li>
-        </ul>
+        <!-- Tech stack -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Tech stack</h3>
+        <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:24px">
+            <div style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;text-align:center">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Language</div>
+                <div style="font-size:12px;color:var(--text-primary);font-weight:600">Python 3.11</div>
+            </div>
+            <div style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;text-align:center">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Web</div>
+                <div style="font-size:12px;color:var(--text-primary);font-weight:600">FastAPI</div>
+            </div>
+            <div style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;text-align:center">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Database</div>
+                <div style="font-size:12px;color:var(--text-primary);font-weight:600">SQLite</div>
+            </div>
+            <div style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;text-align:center">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Trading</div>
+                <div style="font-size:12px;color:var(--text-primary);font-weight:600">py-clob-client</div>
+            </div>
+            <div style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;text-align:center">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Blockchain</div>
+                <div style="font-size:12px;color:var(--text-primary);font-weight:600">Polygon</div>
+            </div>
+            <div style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;text-align:center">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Hardware</div>
+                <div style="font-size:12px;color:var(--text-primary);font-weight:600">Raspberry Pi 5</div>
+            </div>
+        </div>
 
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            The entire system &mdash; data feeds, trading engine, web dashboard, and pattern store &mdash; runs
+            on a single Raspberry Pi 5 as a systemd service. The frontend is vanilla HTML, CSS, and JavaScript
+            with live updates via WebSocket. No frameworks, no build step.
+        </p>
+
+        <!-- Disclaimer -->
         <div style="margin:40px 0 24px;padding:16px 20px;border:1px solid rgba(255,200,0,0.15);border-radius:8px;background:rgba(255,200,0,0.04);font-size:12px;color:var(--text-dim);line-height:1.6">
             <strong style="color:var(--yellow)">Disclaimer</strong><br>
             This is experimental software built for educational purposes. It is not financial advice (NFA).
