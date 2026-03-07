@@ -87,6 +87,21 @@ async def check_risk(signal_score: float, bankroll: float) -> RiskCheck:
                 f"Trade cooldown: {mins}m{secs:02d}s remaining",
             )
 
+    # 10. Post-loss cooldown (longer pause after a loss)
+    post_loss_cd = get("post_loss_cooldown_seconds", 0)
+    if post_loss_cd > 0:
+        last_loss_ts = await state.get("last_loss_timestamp", 0.0)
+        if last_loss_ts > 0:
+            elapsed = time.time() - last_loss_ts
+            if elapsed < post_loss_cd:
+                remaining = int(post_loss_cd - elapsed)
+                mins = remaining // 60
+                secs = remaining % 60
+                return RiskCheck(
+                    False,
+                    f"Post-loss cooldown: {mins}m{secs:02d}s remaining",
+                )
+
     return RiskCheck(True)
 
 
@@ -115,6 +130,7 @@ async def record_outcome(won: bool, pnl: float, bankroll: float):
     if won:
         await state.set("consecutive_losses", 0)
     else:
+        await state.set("last_loss_timestamp", time.time())
         consec = await state.get("consecutive_losses", 0)
         consec += 1
         await state.set("consecutive_losses", consec)

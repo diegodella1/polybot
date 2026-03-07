@@ -12,7 +12,7 @@ Every 5 seconds, Polybot:
 
 1. **Discovers** the current BTC 5-minute binary market on Polymarket
 2. **Computes** a composite trading signal from multiple data sources
-3. **Checks** 8 risk gates before allowing a trade
+3. **Checks** 10 risk gates before allowing a trade
 4. **Sizes** the position proportionally to signal strength and drawdown
 5. **Executes** a limit order on the Polymarket CLOB (Polygon network)
 6. **Resolves** the trade at market expiration and auto-redeems winnings
@@ -33,8 +33,8 @@ Orderbook Feed ──┘                                                        
 polybot/
 ├── bot/                        # Core trading engine
 │   ├── engine.py               # Main loop: discover → signal → risk → size → execute → resolve
-│   ├── signals.py              # Composite signal (momentum, book skew, RSI)
-│   ├── risk.py                 # 8-gate risk gatekeeper
+│   ├── signals.py              # Composite signal (momentum, RSI, vol regime, book skew)
+│   ├── risk.py                 # 10-gate risk gatekeeper
 │   ├── sizing.py               # Signal-proportional position sizing
 │   ├── executor.py             # py-clob-client order execution (EOA mode)
 │   ├── wallet.py               # Web3 ops: balances, redeem, swap
@@ -75,13 +75,14 @@ polybot/
 
 ## Signal Engine
 
-The composite signal combines three weighted components into a single value in `[-1, +1]`:
+The composite signal combines four weighted components into a single value in `[-1, +1]`:
 
 | Component | Weight | Source | Description |
 |-----------|--------|--------|-------------|
-| **Momentum** | 70% | Binance WS | `0.5×ret_1m + 0.3×ret_5m + 0.2×(EMA5-EMA15)/price`, scaled with `tanh(×150)` |
-| **Book Skew** | 10% | Polymarket WS | Orderbook imbalance: `(bid_vol - ask_vol) / total` over top 5 levels |
-| **RSI** | 20% | Binance WS | 14-period RSI normalized: `(RSI - 50) / 50` |
+| **Momentum** | 60% | Binance WS | `0.5×ret_1m + 0.3×ret_5m + 0.2×(EMA5-EMA15)/price`, scaled with `tanh(×50)` |
+| **RSI** | 15% | Binance WS | 14-period RSI normalized: `(RSI - 50) / 50` |
+| **Vol Regime** | 15% | Binance WS | `-(ATR5/ATR20 - 1) × 2` — penalizes choppy markets, favors calm conditions |
+| **Book Skew** | 10% | Polymarket WS | Inverted orderbook imbalance — heavy bid side acts as contrarian sell signal |
 
 - Positive composite → BTC going **UP**
 - Negative composite → BTC going **DOWN**
@@ -92,7 +93,7 @@ The composite signal combines three weighted components into a single value in `
 
 ## Risk Management
 
-Eight sequential gates must all pass before a trade is allowed:
+Ten sequential gates must all pass before a trade is allowed:
 
 | # | Gate | Blocks When |
 |---|------|-------------|
@@ -103,7 +104,35 @@ Eight sequential gates must all pass before a trade is allowed:
 | 5 | Circuit breaker | Win rate below minimum over N trades |
 | 6 | Max exposure | Open positions exceed limit |
 | 7 | Position guard | Already holding a position |
-| 8 | Trade cooldown | Not enough time since last trade |
+| 8 | Trade cooldown | Min 2 minutes between trades (anti rapid-fire) |
+| 9 | Post-loss cooldown | 5-minute pause after every loss |
+| 10 | Entry price filter | Price must be in [0.46, 0.65] range |
+
+---
+
+## Decision Algorithm
+
+Every 5 seconds the bot runs this pipeline. Every gate is a hard filter — one failure skips the round:
+
+```
+ 1. Discover current 5-min BTC market on Polymarket
+ 2. Compute composite signal from 4 sources:
+      momentum = tanh(0.5·ret_1m + 0.3·ret_5m + 0.2·EMA_cross) × 60%
+      rsi      = (RSI_14 - 50) / 50                              × 15%
+      vol      = -(ATR_5/ATR_20 - 1) × 2                         × 15%
+      skew     = -orderbook_imbalance                             × 10%
+      composite ∈ [-1, +1] → positive = UP, negative = DOWN
+ 3. Filter: |composite| must be in [threshold, max_signal]
+ 4. Trend filter: signal direction must align with EMA trend
+ 5. Risk gates (10 checks): bankroll floor, loss streaks, cooldowns, exposure
+ 6. Orderbook validation: fresh, non-stale, bid < ask
+ 7. Entry price must be in [0.46, 0.65] — only near-50/50 markets
+ 8. Spread check: reject if bid-ask spread > 5¢
+ 9. Half-Kelly sizing: bet proportional to edge × bankroll
+10. Execute limit order on-chain (Polygon)
+11. Hold to expiration — no TP/SL (double fee kills profits)
+12. Resolve: winner redeems $1.00/share → USDC.e back to wallet
+```
 
 ---
 
@@ -239,19 +268,21 @@ All parameters in `config.yaml` are hot-reloadable from the admin panel.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `min_entry_price` | 0.38 | Min price to enter (cents) |
+| `min_entry_price` | 0.46 | Min price to enter (cents) |
 | `max_entry_price` | 0.65 | Max price to enter (cents) |
 | `max_spread_cents` | 5 | Max bid-ask spread |
 | `min_time_remaining_sec` | 30 | Min seconds left in market |
-| `trade_cooldown_seconds` | 0 | Min seconds between trades |
+| `trade_cooldown_seconds` | 120 | Min seconds between trades |
+| `post_loss_cooldown_seconds` | 300 | Pause after a loss (seconds) |
 
 ### Signal Weights
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `weights.momentum` | 0.70 | BTC price momentum weight |
-| `weights.book_skew` | 0.10 | Orderbook imbalance weight |
-| `weights.rsi` | 0.20 | RSI indicator weight |
+| `weights.momentum` | 0.60 | BTC price momentum weight |
+| `weights.rsi` | 0.15 | RSI indicator weight |
+| `weights.vol_ratio` | 0.15 | Volatility regime weight |
+| `weights.book_skew` | 0.10 | Inverted orderbook imbalance weight |
 
 ### Toggles
 

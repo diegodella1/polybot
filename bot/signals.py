@@ -34,7 +34,7 @@ def momentum_signal(buf: PriceBuffer) -> float | None:
         return None
 
     raw = 0.5 * ret_1m + 0.3 * ret_5m + 0.2 * (ema_fast - ema_slow) / price
-    return _normalize(raw, scale=150)
+    return _normalize(raw, scale=50)
 
 
 def rsi_signal(buf: PriceBuffer) -> float | None:
@@ -55,7 +55,17 @@ def book_skew_signal(poly_ws: PolymarketWS) -> float | None:
         return None
     if ob.bid_volume(5) < 0.10 or ob.ask_volume(5) < 0.10:
         return None
-    return _clamp(ob.imbalance(levels=5))
+    return _clamp(-ob.imbalance(levels=5))
+
+
+def vol_signal(buf: PriceBuffer) -> float | None:
+    """Volatility regime signal. High vol = choppy = reduce confidence (negative)."""
+    vr = buf.vol_ratio()
+    if vr is None:
+        return None
+    # vol_ratio ~1.0 = neutral, >1.5 = choppy (bad), <0.8 = calm (good)
+    # Map: 0.8 -> +0.4, 1.0 -> 0.0, 1.5 -> -1.0
+    return _clamp(-(vr - 1.0) * 2.0)
 
 
 def compute_signal(
@@ -64,26 +74,30 @@ def compute_signal(
 ) -> dict:
     """Compute composite trading signal. Returns dict with components + total."""
     weights = get("weights", {})
-    w_mom = weights.get("momentum", 0.70)
-    w_skew = weights.get("book_skew", 0.15)
+    w_mom = weights.get("momentum", 0.60)
+    w_skew = weights.get("book_skew", 0.10)
     w_rsi = weights.get("rsi", 0.15)
+    w_vol = weights.get("vol_ratio", 0.15)
 
     # Normalize weights to sum to 1.0
-    w_total = w_mom + w_skew + w_rsi
+    w_total = w_mom + w_skew + w_rsi + w_vol
     if w_total > 0:
         w_mom /= w_total
         w_skew /= w_total
         w_rsi /= w_total
+        w_vol /= w_total
 
     mom = momentum_signal(buf)
     skew = book_skew_signal(poly_ws)
     rsi = rsi_signal(buf)
+    vol = vol_signal(buf)
 
     result = {
         "momentum": mom,
         "book_skew": skew,
         "rsi": rsi,
         "vol_ratio": buf.vol_ratio(),
+        "vol_signal": vol,
         "composite": None,
         "tradeable": False,
     }
@@ -99,6 +113,8 @@ def compute_signal(
         components.append((w_skew, skew))
     if rsi is not None:
         components.append((w_rsi, rsi))
+    if vol is not None:
+        components.append((w_vol, vol))
 
     active_weight = sum(w for w, _ in components)
     if active_weight > 0:

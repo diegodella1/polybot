@@ -46,7 +46,7 @@
             </div>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
                 <div style="font-size:11px;color:var(--green);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">2. SIGNAL</div>
-                <div style="font-size:12px;color:var(--text-dim)">Computes a composite score from BTC momentum, orderbook skew, and RSI</div>
+                <div style="font-size:12px;color:var(--text-dim)">Computes a composite score from BTC momentum, orderbook skew, RSI, and volatility regime</div>
             </div>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
                 <div style="font-size:11px;color:var(--yellow);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">3. RISK CHECK</div>
@@ -78,18 +78,23 @@
             <tbody>
                 <tr style="border-bottom:1px solid var(--border)">
                     <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Momentum</td>
-                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">70%</td>
+                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">60%</td>
                     <td style="padding:10px 12px;color:var(--text-dim)">BTC price returns (1m + 5m) and EMA crossover from Binance</td>
                 </tr>
                 <tr style="border-bottom:1px solid var(--border)">
                     <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">RSI</td>
-                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">20%</td>
+                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">15%</td>
                     <td style="padding:10px 12px;color:var(--text-dim)">14-period Relative Strength Index, overbought/oversold detection</td>
+                </tr>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Vol Regime</td>
+                    <td style="padding:10px 12px;text-align:center;color:var(--accent)">15%</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">ATR(5)/ATR(20) ratio &mdash; penalizes choppy markets, favors calm conditions</td>
                 </tr>
                 <tr>
                     <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Book Skew</td>
                     <td style="padding:10px 12px;text-align:center;color:var(--accent)">10%</td>
-                    <td style="padding:10px 12px;color:var(--text-dim)">Buy vs sell pressure imbalance on Polymarket's orderbook</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">Inverted orderbook imbalance &mdash; heavy bid side = contrarian sell signal</td>
                 </tr>
             </tbody>
         </table>
@@ -102,7 +107,7 @@
         <!-- Risk management -->
         <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Risk management</h3>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
-            Every potential trade passes through 8 sequential risk gates. If any gate fails, the trade is blocked:
+            Every potential trade passes through 10 sequential risk gates. If any gate fails, the trade is blocked:
         </p>
         <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
             <li style="margin-bottom:6px">Bankroll floor &mdash; emergency stop below minimum balance</li>
@@ -110,8 +115,41 @@
             <li style="margin-bottom:6px">Circuit breaker &mdash; shuts down if win rate drops too low</li>
             <li style="margin-bottom:6px">Max exposure &mdash; limits total open position value</li>
             <li style="margin-bottom:6px">Position guard &mdash; only one position at a time</li>
+            <li style="margin-bottom:6px">Trade cooldown &mdash; minimum 2 minutes between trades (anti rapid-fire)</li>
+            <li style="margin-bottom:6px">Post-loss cooldown &mdash; 5-minute pause after every loss</li>
             <li style="margin-bottom:6px">Drawdown scaling &mdash; automatically shrinks bet sizes on losing days</li>
         </ul>
+
+        <!-- Decision algorithm -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Decision algorithm</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            Every 5 seconds the bot runs this pipeline. Every gate is a hard filter &mdash; one failure skips the round:
+        </p>
+
+        <div style="font-family:var(--font-mono, monospace);font-size:12px;color:var(--text-dim);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:24px;line-height:1.8;overflow-x:auto">
+            <div><span style="color:var(--accent)">1.</span> Discover current 5-min BTC market on Polymarket</div>
+            <div><span style="color:var(--accent)">2.</span> Compute composite signal from 4 sources:</div>
+            <div style="padding-left:20px">momentum = tanh(0.5&middot;ret_1m + 0.3&middot;ret_5m + 0.2&middot;EMA_cross) &times; 60%</div>
+            <div style="padding-left:20px">rsi = (RSI_14 - 50) / 50 &times; 15%</div>
+            <div style="padding-left:20px">vol = -(ATR_5/ATR_20 - 1) &times; 2 &times; 15%</div>
+            <div style="padding-left:20px">skew = -orderbook_imbalance &times; 10%</div>
+            <div style="padding-left:20px;color:var(--text-primary)">composite &isin; [-1, +1] &rarr; positive = UP, negative = DOWN</div>
+            <div style="margin-top:8px"><span style="color:var(--accent)">3.</span> Filter: |composite| must be in [threshold, max_signal]</div>
+            <div><span style="color:var(--accent)">4.</span> Trend filter: signal direction must align with EMA trend</div>
+            <div><span style="color:var(--accent)">5.</span> Risk gates (10 checks): bankroll floor, loss streaks, cooldowns, exposure</div>
+            <div><span style="color:var(--accent)">6.</span> Orderbook validation: fresh, non-stale, bid &lt; ask</div>
+            <div><span style="color:var(--accent)">7.</span> Entry price must be in [0.46, 0.65] &mdash; only near-50/50 markets</div>
+            <div><span style="color:var(--accent)">8.</span> Spread check: reject if bid-ask spread &gt; 5&cent;</div>
+            <div><span style="color:var(--accent)">9.</span> Half-Kelly sizing: bet proportional to edge &times; bankroll</div>
+            <div><span style="color:var(--accent)">10.</span> Execute limit order on-chain (Polygon)</div>
+            <div><span style="color:var(--accent)">11.</span> Hold to expiration &mdash; no TP/SL (double fee kills profits)</div>
+            <div><span style="color:var(--accent)">12.</span> Resolve: winner redeems $1.00/share &rarr; USDC.e back to wallet</div>
+        </div>
+
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
+            The bot also maintains a k-NN pattern store with 339+ historical patterns.
+            After each trade, it records the market features and outcome for future reference.
+        </p>
 
         <!-- The market -->
         <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">The market</h3>
