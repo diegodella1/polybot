@@ -454,17 +454,32 @@ tr:hover { background: var(--surface-hover); }
 }
 
 .goal-track {
-    height: 4px;
+    height: 6px;
     background: var(--surface-3);
-    border-radius: 2px;
+    border-radius: 3px;
     overflow: hidden;
 }
 
 .goal-fill {
     height: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--green));
-    border-radius: 2px;
+    background: linear-gradient(90deg, #8b5cf6, #d4a017, #f5c842);
+    border-radius: 3px;
     transition: width 1s ease;
+    position: relative;
+    box-shadow: 0 0 8px rgba(245,200,66,0.4);
+}
+
+.goal-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%);
+    animation: goal-shimmer 2s ease-in-out infinite;
+}
+
+@keyframes goal-shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
 }
 
 /* New trade flash */

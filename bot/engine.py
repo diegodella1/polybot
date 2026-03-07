@@ -428,6 +428,67 @@ class TradingEngine:
             )
             return
 
+        # Trend filter: only trade in the direction of the macro trend
+        trend_filter = get("trend_filter", True)
+        if trend_filter:
+            snap = self.price_buffer.snapshot()
+            if snap is not None:
+                ret_15m = snap.get("ret_15m")
+                ema_fast = snap.get("ema_fast")
+                ema_slow = snap.get("ema_slow")
+                trend_threshold = get("trend_threshold", 0.0005)  # 0.05% min move
+
+                # Trend score: combine ret_15m direction + EMA crossover
+                trend_score = 0.0
+                if ret_15m is not None:
+                    trend_score += ret_15m
+                if ema_fast is not None and ema_slow is not None and ema_slow != 0:
+                    trend_score += (ema_fast - ema_slow) / ema_slow
+
+                # Signal wants UP (composite > 0) but trend is DOWN, or vice versa
+                signal_is_up = composite > 0
+                trend_is_up = trend_score > trend_threshold
+                trend_is_down = trend_score < -trend_threshold
+                trend_is_flat = not trend_is_up and not trend_is_down
+
+                if trend_is_flat:
+                    logger.info(
+                        "Signal: %.2f %s → SKIP: no clear trend (score=%.6f, threshold=%.4f)",
+                        composite, original_dir, trend_score, trend_threshold,
+                    )
+                    await self._broadcast_round(
+                        "skip", f"Sin tendencia clara (trend={trend_score:.6f})",
+                        signal=composite, market_name=market_name,
+                    )
+                    return
+
+                if signal_is_up and trend_is_down:
+                    logger.info(
+                        "Signal: %.2f UP → SKIP: trend is DOWN (score=%.6f)",
+                        composite, trend_score,
+                    )
+                    await self._broadcast_round(
+                        "skip", f"Signal UP contra tendencia DOWN (trend={trend_score:.6f})",
+                        signal=composite, market_name=market_name,
+                    )
+                    return
+
+                if not signal_is_up and trend_is_up:
+                    logger.info(
+                        "Signal: %.2f DOWN → SKIP: trend is UP (score=%.6f)",
+                        composite, trend_score,
+                    )
+                    await self._broadcast_round(
+                        "skip", f"Signal DOWN contra tendencia UP (trend={trend_score:.6f})",
+                        signal=composite, market_name=market_name,
+                    )
+                    return
+
+                logger.info(
+                    "Trend OK: signal %s aligns with trend (score=%.6f)",
+                    original_dir, trend_score,
+                )
+
         if abs(composite) > max_signal:
             logger.info(
                 "Signal: %.2f (original: %.2f %s) → SKIP: too strong (> %.2f)",
@@ -567,7 +628,27 @@ class TradingEngine:
             )
             return
 
-        # 5. EXECUTE
+        # 5. CHECK: max 2 trades per market (condition_id)
+        max_per_market = 2
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT COUNT(*) as c FROM trades WHERE condition_id = ? AND outcome IS NULL",
+                (market.condition_id,),
+            )
+            row = await cursor.fetchone()
+            pending_in_market = row["c"] if row else 0
+        finally:
+            await db.close()
+        if pending_in_market >= max_per_market:
+            logger.info("Round %d: already %d pending trades in this market, skipping", self._round, pending_in_market)
+            await self._broadcast_round(
+                "skip", f"Ya hay {pending_in_market} trades en este mercado",
+                signal=composite, market_name=market_name,
+            )
+            return
+
+        # 6. EXECUTE
         result = await execute_trade(
             condition_id=market.condition_id,
             token_id=token_id,
