@@ -30,12 +30,7 @@ async def check_risk(signal_score: float, bankroll: float) -> RiskCheck:
     if not enabled:
         return RiskCheck(False, "Bot is stopped")
 
-    # 2. Signal threshold
-    threshold = get("trade_threshold", 0.15)
-    if abs(signal_score) < threshold:
-        return RiskCheck(False, f"Signal {signal_score:.3f} below threshold {threshold}")
-
-    # 4. Bankroll floor (emergency stop)
+    # 2. Bankroll floor (emergency stop)
     bankroll_floor = get("bankroll_floor_usd", 5.0)
     if bankroll < bankroll_floor:
         return RiskCheck(False, f"Bankroll ${bankroll:.2f} below floor ${bankroll_floor:.2f}")

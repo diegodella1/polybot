@@ -9,7 +9,7 @@ import numpy as np
 
 from bot.config import get
 from bot.state import state
-from bot.signals import compute_signal
+from bot.fair_value import estimate_fair_value, find_edge, TAKER_FEE
 from bot.risk import check_risk, record_outcome, decrement_cooldown, reset_daily
 from bot.sizing import kelly_size
 from bot.executor import execute_trade, exit_position, resolve_trade, update_daily_stats, recover_pending_fills
@@ -17,7 +17,7 @@ from bot.market_discovery import discover_market
 from rag.reflection import maybe_reflect
 from data.binance_ws import BinanceWS
 from data.buffer import PriceBuffer
-from data.polymarket_ws import PolymarketWS
+from data.polymarket_ws import PolymarketWS, fetch_orderbook_snapshot
 from db import get_db
 
 logger = logging.getLogger(__name__)
@@ -235,6 +235,10 @@ class TradingEngine:
                 if self._round % 5 == 0 and self._pending_redeems:
                     await self._process_pending_redeems()
 
+                # Resolve paper trades every 12 rounds (~1 min)
+                if self._round % 12 == 3:
+                    await self._resolve_paper_trades()
+
                 # Resolve any pending trades every 12 rounds (~1 min)
                 if self._round % 12 == 6:
                     bankroll = await state.get("bankroll", 0.0)
@@ -373,263 +377,180 @@ class TradingEngine:
         if not ob.bids and not ob.asks:
             await self.polymarket_ws.fetch_orderbook_rest(market.token_up_id)
 
-        # 2. SIGNAL
-        signals = compute_signal(
-            self.price_buffer,
-            self.polymarket_ws,
-        )
+        # 2. FAIR VALUE SIGNAL
+        fv = estimate_fair_value(self.price_buffer)
+        if fv is None:
+            logger.debug("Round %d: fair value not ready", self._round)
+            await self._broadcast_round(
+                "skip", "Fair value no listo (pocos datos)",
+                market_name=market_name,
+            )
+            return
 
-        self._last_signals = signals
+        # Vol regime filter: skip low vol (no signal) and very high vol (chaos)
+        min_vol = get("min_vol_5m", 0.0005)
+        max_vol = get("max_vol_5m", 0.004)
+        if fv.vol_5m < min_vol:
+            await self._broadcast_round(
+                "skip", f"Vol muy baja ({fv.vol_5m*100:.4f}% < {min_vol*100:.2f}%)",
+                market_name=market_name,
+            )
+            return
+        if fv.vol_5m > max_vol:
+            await self._broadcast_round(
+                "skip", f"Vol muy alta ({fv.vol_5m*100:.4f}% > {max_vol*100:.2f}%)",
+                market_name=market_name,
+            )
+            return
+
+        ob_up = self.polymarket_ws.orderbook
+        price_up = ob_up.midpoint
+        if price_up is None:
+            price_up = ob_up.best_ask or ob_up.best_bid
+        if price_up is None or price_up <= 0:
+            await self._broadcast_round(
+                "skip", "Sin precio de mercado",
+                market_name=market_name,
+            )
+            return
+
+        # Fetch Down token orderbook independently (no WS mutation)
+        ob_down = await fetch_orderbook_snapshot(market.token_down_id)
+        if ob_down.midpoint is not None:
+            price_down = ob_down.midpoint
+        else:
+            price_down = 1.0 - price_up  # fallback
+
+        edge_result = find_edge(fv, price_up, price_down)
+
+        # Cache for dashboard
+        self._last_signals = {
+            "prob_up": round(fv.prob_up, 4),
+            "prob_down": round(fv.prob_down, 4),
+            "vol_5m": round(fv.vol_5m, 6),
+            "drift_5m": round(fv.drift_5m, 6),
+            "price_up": round(price_up, 4),
+            "price_down": round(price_down, 4),
+            "edge": round(edge_result.edge, 4),
+            "side": edge_result.side,
+            "has_edge": edge_result.has_edge,
+        }
 
         if self.on_signal:
-            await self.on_signal(signals)
-
-        composite = signals["composite"]
-        if composite is None:
-            logger.debug("Round %d: signals not ready", self._round)
-            await self._broadcast_round(
-                "skip", "Señales no listas",
-                market_name=market_name,
-            )
-            return
-
-        # Signal inversion: flip UP signals to DOWN (model predicts UP wrong)
-        original_composite = composite
-        original_dir = "UP" if composite > 0 else "DOWN"
-        inverted = False
-        if get("invert_up_signal", False) and composite > 0:
-            composite = -composite
-            inverted = True
+            await self.on_signal(self._last_signals)
 
         logger.info(
-            "Round %d | signal=%.3f (original: %.3f %s%s) | mom=%.3f skew=%s rsi=%s",
+            "Round %d | FV P(up)=%.1f%% mkt=%.1f%% | P(dn)=%.1f%% mkt=%.1f%% | "
+            "vol=%.4f%% drift=%.4f%% | edge=%s %.1f%%",
             self._round,
-            composite,
-            original_composite,
-            original_dir,
-            " → inverted to DOWN" if inverted else "",
-            signals["momentum"] or 0,
-            f"{signals['book_skew']:.3f}" if signals["book_skew"] is not None else "N/A",
-            f"{signals['rsi']:.3f}" if signals["rsi"] is not None else "N/A",
+            fv.prob_up * 100, price_up * 100,
+            fv.prob_down * 100, price_down * 100,
+            fv.vol_5m * 100, fv.drift_5m * 100,
+            edge_result.side or "none",
+            edge_result.edge * 100,
         )
 
-        threshold = get("trade_threshold", 0.15)
-        max_signal = get("max_signal", 1.0)
-        if abs(composite) < threshold:
-            logger.info(
-                "Signal: %.2f (original: %.2f %s) → SKIP: below threshold (%.2f)",
-                composite, original_composite, original_dir, threshold,
-            )
+        # Record paper trade (always, for tracking)
+        await self._fair_value_paper_round(market, fv, price_up, price_down, edge_result)
+
+        if not edge_result.has_edge:
             await self._broadcast_round(
                 "skip",
-                f"Señal débil ({abs(composite):.2f} < {threshold} necesario)",
-                signal=composite,
+                f"Sin edge ({edge_result.edge*100:.1f}%)",
                 market_name=market_name,
             )
             return
 
-        # Trend filter: only trade in the direction of the macro trend
-        trend_filter = get("trend_filter", True)
-        if trend_filter:
-            snap = self.price_buffer.snapshot()
-            if snap is not None:
-                ret_15m = snap.get("ret_15m")
-                ema_fast = snap.get("ema_fast")
-                ema_slow = snap.get("ema_slow")
-                trend_threshold = get("trend_threshold", 0.0005)  # 0.05% min move
-
-                # Trend score: combine ret_15m direction + EMA crossover
-                trend_score = 0.0
-                if ret_15m is not None:
-                    trend_score += ret_15m
-                if ema_fast is not None and ema_slow is not None and ema_slow != 0:
-                    trend_score += (ema_fast - ema_slow) / ema_slow
-
-                # Signal wants UP (composite > 0) but trend is DOWN, or vice versa
-                signal_is_up = composite > 0
-                trend_is_up = trend_score > trend_threshold
-                trend_is_down = trend_score < -trend_threshold
-                trend_is_flat = not trend_is_up and not trend_is_down
-
-                if trend_is_flat:
-                    logger.info(
-                        "Signal: %.2f %s → SKIP: no clear trend (score=%.6f, threshold=%.4f)",
-                        composite, original_dir, trend_score, trend_threshold,
-                    )
-                    await self._broadcast_round(
-                        "skip", f"Sin tendencia clara (trend={trend_score:.6f})",
-                        signal=composite, market_name=market_name,
-                    )
-                    return
-
-                if signal_is_up and trend_is_down:
-                    logger.info(
-                        "Signal: %.2f UP → SKIP: trend is DOWN (score=%.6f)",
-                        composite, trend_score,
-                    )
-                    await self._broadcast_round(
-                        "skip", f"Signal UP contra tendencia DOWN (trend={trend_score:.6f})",
-                        signal=composite, market_name=market_name,
-                    )
-                    return
-
-                if not signal_is_up and trend_is_up:
-                    logger.info(
-                        "Signal: %.2f DOWN → SKIP: trend is UP (score=%.6f)",
-                        composite, trend_score,
-                    )
-                    await self._broadcast_round(
-                        "skip", f"Signal DOWN contra tendencia UP (trend={trend_score:.6f})",
-                        signal=composite, market_name=market_name,
-                    )
-                    return
-
-                logger.info(
-                    "Trend OK: signal %s aligns with trend (score=%.6f)",
-                    original_dir, trend_score,
-                )
-
-        if abs(composite) > max_signal:
-            logger.info(
-                "Signal: %.2f (original: %.2f %s) → SKIP: too strong (> %.2f)",
-                composite, original_composite, original_dir, max_signal,
-            )
+        # Edge band filter: best WR in 6-12% bucket (71%), 12-20% still +EV (57%)
+        min_edge = get("min_edge", 0.03)
+        max_edge = get("max_edge", 0.12)
+        if edge_result.edge < min_edge:
             await self._broadcast_round(
                 "skip",
-                f"Señal muy fuerte ({abs(composite):.2f} > {max_signal}) — mercado ya priceó",
-                signal=composite,
+                f"Edge muy bajo ({edge_result.edge*100:.1f}% < {min_edge*100:.0f}%)",
                 market_name=market_name,
             )
             return
+        if edge_result.edge > max_edge:
+            await self._broadcast_round(
+                "skip",
+                f"Edge excesivo ({edge_result.edge*100:.1f}% > {max_edge*100:.0f}%) — modelo sobreconfiado",
+                market_name=market_name,
+            )
+            return
+
+        side = edge_result.side
 
         # 3. RISK CHECK
         bankroll = await state.get("bankroll", 50.0)
-        risk = await check_risk(composite, bankroll)
+        risk = await check_risk(edge_result.edge, bankroll)
         if not risk:
             logger.info(
-                "Signal: %.2f (original: %.2f %s) → SKIP: %s",
-                composite, original_composite, original_dir, risk.reason,
+                "Round %d: FV edge %.1f%% %s → SKIP: %s",
+                self._round, edge_result.edge * 100, side.upper(), risk.reason,
             )
             await self._broadcast_round(
                 "skip",
                 self._risk_reason_es(risk.reason),
-                signal=composite,
                 market_name=market_name,
             )
             return
 
-        # 4. SIZE — need orderbook for pricing
-        ob = self.polymarket_ws.orderbook
-        if not ob.asks and not ob.bids:
-            logger.debug("Round %d: orderbook empty, skipping", self._round)
-            await self._broadcast_round(
-                "skip", "Orderbook vacío — sin liquidez",
-                signal=composite, market_name=market_name,
-            )
-            return
-
-        if ob.is_stale:
-            logger.info("Round %d: orderbook stale, trying REST fallback", self._round)
-            fetched = await self.polymarket_ws.fetch_orderbook_rest(market.token_up_id)
-            ob = self.polymarket_ws.orderbook
-            if not fetched or ob.is_stale:
-                logger.warning("Round %d: orderbook still stale after REST fallback", self._round)
+        # 4. SIZE — get actual entry price from orderbook
+        if side == "up":
+            token_id = market.token_up_id
+            entry_price = ob_up.best_ask or price_up
+            trade_spread = ob_up.spread
+        else:
+            token_id = market.token_down_id
+            trade_spread = ob_down.spread
+            if ob_down.best_ask is not None and 0.05 < ob_down.best_ask < 0.95:
+                entry_price = ob_down.best_ask
+            elif ob_up.best_bid is not None and 0.05 < ob_up.best_bid < 0.95:
+                # Derive from Up bid (no re-subscribe needed)
+                entry_price = 1.0 - ob_up.best_bid
+            else:
+                logger.warning("Round %d: No Down pricing available, skipping", self._round)
                 await self._broadcast_round(
-                    "skip", "Orderbook desactualizado (>30s)",
-                    signal=composite, market_name=market_name,
+                    "skip", "Sin precio para Down token",
+                    market_name=market_name,
                 )
                 return
 
-        if not ob.is_valid:
-            logger.warning("Round %d: orderbook corrupt (bid >= ask), skipping", self._round)
-            await self._broadcast_round(
-                "skip", "Orderbook corrupto (bid >= ask)",
-                signal=composite, market_name=market_name,
-            )
-            return
-
-        # Determine side and entry price
-        if composite > 0:
-            side = "up"
-            token_id = market.token_up_id
-            entry_price = ob.best_ask or 0.50
-            trade_spread = ob.spread  # Spread from UP token orderbook
-        else:
-            side = "down"
-            token_id = market.token_down_id
-            # Subscribe to Down token orderbook for accurate pricing
-            await self.polymarket_ws.subscribe(market.token_down_id)
-            await asyncio.sleep(2)
-            ob_down = self.polymarket_ws.orderbook
-            # REST fallback if WS orderbook is empty for Down token
-            if not ob_down.bids and not ob_down.asks:
-                await self.polymarket_ws.fetch_orderbook_rest(market.token_down_id)
-                ob_down = self.polymarket_ws.orderbook
-            trade_spread = ob_down.spread  # Spread from DOWN token orderbook
-            # Use Down ask if available and sane, otherwise fallback
-            if ob_down.best_ask is not None and 0.05 < ob_down.best_ask < 0.95:
-                entry_price = ob_down.best_ask
-            else:
-                # Try complement of Up best_bid
-                await self.polymarket_ws.subscribe(market.token_up_id)
-                await asyncio.sleep(1)
-                ob = self.polymarket_ws.orderbook
-                up_bid = ob.best_bid
-                if up_bid is not None and 0.05 < up_bid < 0.95:
-                    entry_price = 1.0 - up_bid
-                else:
-                    entry_price = 0.50
-
-        # Entry price filter: only trade near-50/50 markets
+        # Entry price filter
         min_ep = get("min_entry_price", 0.25)
         max_ep = get("max_entry_price", 0.75)
         if entry_price < min_ep or entry_price > max_ep:
             logger.info(
-                "Signal: %.2f (original: %.2f %s) → SKIP: contract price %.2f outside [%.2f, %.2f]",
-                composite, original_composite, original_dir, entry_price, min_ep, max_ep,
+                "Round %d: FV %s → SKIP: price %.2f outside [%.2f, %.2f]",
+                self._round, side.upper(), entry_price, min_ep, max_ep,
             )
             await self._broadcast_round(
                 "skip",
-                f"Precio de entrada {entry_price:.2f} fuera de rango seguro [{min_ep}, {max_ep}]",
-                signal=composite,
+                f"Precio {entry_price:.2f} fuera de rango [{min_ep}, {max_ep}]",
                 market_name=market_name,
             )
             return
 
-        # Validate spread BEFORE sizing — prevents SL triggers from wide spreads
+        # Spread check
         max_spread = get("max_spread_cents", 5) / 100.0
         if trade_spread is not None and trade_spread > max_spread:
-            logger.info(
-                "Round %d: spread %.4f > max %.4f on %s token, skipping",
-                self._round, trade_spread, max_spread, side.upper(),
-            )
             await self._broadcast_round(
                 "skip",
-                f"Spread muy amplio ({trade_spread*100:.1f}¢ > {max_spread*100:.0f}¢) en token {side.upper()}",
-                signal=composite,
+                f"Spread amplio ({trade_spread*100:.1f}¢ > {max_spread*100:.0f}¢)",
                 market_name=market_name,
             )
             return
 
         daily_pnl = await state.get("daily_pnl", 0.0)
-        sizing = kelly_size(abs(composite), entry_price, bankroll, daily_pnl=daily_pnl)
+        sizing = kelly_size(edge_result.edge, entry_price, bankroll, daily_pnl=daily_pnl)
         if sizing["size_usd"] <= 0:
             reason_en = sizing.get("reason", "no edge per Kelly")
-            logger.info(
-                "Round %d: no trade — %s", self._round, reason_en,
-            )
-            reason_es = "Sin edge según Kelly"
-            if "spread" in reason_en.lower():
-                reason_es = "Spread muy amplio"
-            await self._broadcast_round(
-                "skip", reason_es,
-                signal=composite,
-                market_name=market_name,
-            )
+            reason_es = "Sin edge según Kelly" if "spread" not in reason_en.lower() else "Spread muy amplio"
+            await self._broadcast_round("skip", reason_es, market_name=market_name)
             return
 
-        # 5. CHECK: max 2 trades per market (condition_id)
-        max_per_market = 2
+        # Max 1 trade per market
         db = await get_db()
         try:
             cursor = await db.execute(
@@ -640,24 +561,30 @@ class TradingEngine:
             pending_in_market = row["c"] if row else 0
         finally:
             await db.close()
-        if pending_in_market >= max_per_market:
-            logger.info("Round %d: already %d pending trades in this market, skipping", self._round, pending_in_market)
+        if pending_in_market >= 1:
             await self._broadcast_round(
-                "skip", f"Ya hay {pending_in_market} trades en este mercado",
-                signal=composite, market_name=market_name,
+                "skip", "Ya hay trade en este mercado",
+                market_name=market_name,
             )
             return
 
-        # 6. EXECUTE
+        # 5. EXECUTE
+        signal_details = {
+            "model": "fair_value",
+            "prob_estimated": edge_result.prob,
+            "edge": edge_result.edge,
+            "vol_5m": fv.vol_5m,
+            "drift_5m": fv.drift_5m,
+        }
         result = await execute_trade(
             condition_id=market.condition_id,
             token_id=token_id,
             side=side,
-            signal_score=composite,
+            signal_score=edge_result.edge,
             size_usd=sizing["size_usd"],
             shares=sizing["shares"],
             entry_price=entry_price,
-            signal_details=signals,
+            signal_details=signal_details,
             spread=trade_spread,
             btc_price=self.price_buffer.current_price,
         )
@@ -666,28 +593,25 @@ class TradingEngine:
             logger.warning("Round %d: execution failed — %s", self._round, result.error)
             return
 
-        # Record trade timestamp for cooldown
         await state.set("last_trade_timestamp", time.time())
 
-        # Enhanced trade logging
-        side_label = "UP" if side == "up" else "DOWN"
-        inversion_note = f" (original: {original_composite:.2f} {original_dir} → inverted to DOWN)" if inverted else ""
+        side_label = side.upper()
         logger.info(
-            "Signal: %.2f%s → TRADE: %s @ %.2f¢, size $%.2f",
-            composite, inversion_note, side_label, entry_price * 100, sizing["size_usd"],
+            "FV TRADE: %s @ %.2f¢ (edge=%.1f%%, prob=%.1f%%), size $%.2f",
+            side_label, entry_price * 100, edge_result.edge * 100,
+            edge_result.prob * 100, sizing["size_usd"],
         )
         await self._broadcast_round(
             "trade",
-            f"Trade ejecutado: {side_label} ${sizing['size_usd']:.2f}",
-            signal=composite,
+            f"Trade: {side_label} ${sizing['size_usd']:.2f} (edge={edge_result.edge*100:.1f}%)",
             market_name=market_name,
         )
 
-        # Notify dashboard
         trade_data = {
             "trade_id": result.trade_id,
             "side": side,
-            "signal": composite,
+            "edge": edge_result.edge,
+            "prob": edge_result.prob,
             "size_usd": sizing["size_usd"],
             "entry_price": entry_price,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -696,20 +620,19 @@ class TradingEngine:
         if self.on_trade:
             await self.on_trade(trade_data)
 
-        # 6. RESOLVE — launch monitoring + resolution in background
-        # so the main loop keeps running rounds and updating signals
+        # 6. RESOLVE in background
         asyncio.create_task(self._monitor_and_resolve(
             market=market,
             side=side,
             token_id=token_id,
             result=result,
             bankroll=bankroll,
-            composite=composite,
+            edge=edge_result.edge,
             market_name=market_name,
         ))
 
     async def _monitor_and_resolve(self, market, side, token_id, result,
-                                    bankroll, composite, market_name):
+                                    bankroll, edge, market_name):
         """Background task: monitor position for SL/TP, then resolve."""
         try:
             wait_seconds = min(
@@ -806,7 +729,7 @@ class TradingEngine:
                     await self._broadcast_round(
                         "stop_loss",
                         f"Stop-loss: vendido a {exit_result['exit_price'] * 100:.0f}¢ (-{loss_pct:.0f}%)",
-                        signal=composite,
+                        signal=edge,
                         market_name=market_name,
                     )
                 else:
@@ -814,7 +737,7 @@ class TradingEngine:
                     await self._broadcast_round(
                         "take_profit",
                         f"Take-profit: vendido a {exit_result['exit_price'] * 100:.0f}¢ (+{gain_pct:.0f}%)",
-                        signal=composite,
+                        signal=edge,
                         market_name=market_name,
                     )
             else:
@@ -826,7 +749,7 @@ class TradingEngine:
                     await self._broadcast_round(
                         "skip",
                         "Resolución no disponible, trade queda PENDING",
-                        signal=composite,
+                        signal=edge,
                         market_name=market_name,
                     )
                     return
@@ -1116,6 +1039,142 @@ class TradingEngine:
         if last_reset != today:
             await reset_daily()
 
+    async def _fair_value_paper_round(self, market, fv, price_up, price_down, edge_result):
+        """Record paper trade if edge is found (for ongoing model validation)."""
+        try:
+            if not edge_result.has_edge:
+                return
+
+            db = await get_db()
+            try:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) c FROM paper_trades WHERE condition_id = ? AND outcome IS NULL",
+                    (market.condition_id,),
+                )
+                row = await cursor.fetchone()
+                if row and row["c"] > 0:
+                    return
+
+                btc_price = self.price_buffer.current_price
+                await db.execute(
+                    """INSERT INTO paper_trades
+                       (timestamp, condition_id, side, prob_estimated, market_price,
+                        edge, vol_5m, drift_5m, price_up, price_down, btc_price)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        market.condition_id,
+                        edge_result.side,
+                        edge_result.prob,
+                        edge_result.market_price,
+                        edge_result.edge,
+                        fv.vol_5m,
+                        fv.drift_5m,
+                        price_up,
+                        price_down,
+                        btc_price,
+                    ),
+                )
+                await db.commit()
+
+                logger.info(
+                    "PAPER TRADE: %s @ %.1f¢ (prob=%.1f%%, edge=+%.1f%%)",
+                    edge_result.side.upper(),
+                    edge_result.market_price * 100,
+                    edge_result.prob * 100,
+                    edge_result.edge * 100,
+                )
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.warning("Fair value paper round error: %s", e)
+
+    async def _resolve_paper_trades(self):
+        """Resolve pending paper trades by checking market outcomes."""
+        db = await get_db()
+        try:
+            # Auto-expire paper trades older than 15 min (market should resolve in ~6 min)
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+            expired = await db.execute(
+                """UPDATE paper_trades SET outcome = 'expired', pnl_simulated = 0,
+                   resolved_at = ? WHERE outcome IS NULL AND timestamp < ?""",
+                (datetime.now(timezone.utc).isoformat(), cutoff),
+            )
+            if expired.rowcount > 0:
+                await db.commit()
+                logger.info("Expired %d stale paper trades (>15 min unresolved)", expired.rowcount)
+
+            cursor = await db.execute(
+                """SELECT id, condition_id, side, market_price, prob_estimated
+                   FROM paper_trades WHERE outcome IS NULL
+                   ORDER BY id ASC LIMIT 20"""
+            )
+            pending = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        if not pending:
+            return
+
+        import httpx
+        for pt in pending:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(
+                        f"https://clob.polymarket.com/markets/{pt['condition_id']}"
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                if not data.get("closed"):
+                    continue
+
+                # Determine winner
+                side = pt["side"]
+                won = None
+                for tok in data.get("tokens", []):
+                    outcome_name = (tok.get("outcome") or "").lower()
+                    if (side == "up" and outcome_name in ("up", "yes")) or \
+                       (side == "down" and outcome_name in ("down", "no")):
+                        won = tok.get("winner", False)
+                        break
+
+                if won is None:
+                    continue
+
+                # Calculate simulated PnL
+                # Simulated $1 bet: win = $1/price - $1*(1+fee), loss = -$1*(1+fee)
+                entry_cost = 1.0 * (1 + 0.10)  # $1 bet + 10% fee
+                if won:
+                    pnl = (1.0 / pt["market_price"]) - entry_cost
+                    outcome = "win"
+                else:
+                    pnl = -entry_cost
+                    outcome = "loss"
+
+                db = await get_db()
+                try:
+                    await db.execute(
+                        """UPDATE paper_trades SET outcome = ?, pnl_simulated = ?,
+                           resolved_at = ? WHERE id = ?""",
+                        (outcome, round(pnl, 4),
+                         datetime.now(timezone.utc).isoformat(), pt["id"]),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+
+                logger.info(
+                    "PAPER RESOLVED: #%d %s %s → pnl=$%.3f (prob_est=%.1f%% mkt=%.1f¢)",
+                    pt["id"], side.upper(), outcome.upper(), pnl,
+                    pt["prob_estimated"] * 100, pt["market_price"] * 100,
+                )
+
+            except Exception as e:
+                logger.debug("Paper trade resolution error for #%d: %s", pt["id"], e)
+
     async def get_status(self) -> dict:
         """Get current engine status for API/dashboard."""
         bankroll = await state.get("bankroll", 0)
@@ -1154,18 +1213,15 @@ class TradingEngine:
             "consecutive_losses": consec_losses,
             "cooldown_remaining": cooldown,
             "circuit_breaker": circuit_breaker,
-            "invert_up_signal": get("invert_up_signal", False),
             "trade_cooldown_seconds": get("trade_cooldown_seconds", 0),
             "daily_loss_limit_pct": get("daily_loss_limit_pct", 0.15),
-            "trade_threshold": get("trade_threshold", 0.20),
+            "min_edge": get("min_edge", 0.03),
+            "max_edge": get("max_edge", 0.12),
             "price_buffer_size": self.price_buffer.size,
             "current_price": self.price_buffer.current_price,
             "dry_run": get("dry_run", True),
             "has_creds": has_polymarket_creds(),
             "wallet_balance": self._cached_wallet_balance,
             "unredeemed_value": self._cached_unredeemed,
-            "signals": self._last_signals or compute_signal(
-                self.price_buffer,
-                self.polymarket_ws,
-            ),
+            "signals": self._last_signals,
         }

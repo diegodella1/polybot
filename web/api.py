@@ -80,6 +80,39 @@ def create_router(engine, ws_manager) -> APIRouter:
         finally:
             await db.close()
 
+    @router.get("/paper-trades")
+    async def get_paper_trades(limit: int = 100):
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT * FROM paper_trades ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            trades = [dict(r) for r in rows]
+
+            # Summary stats (exclude expired — unknown outcome)
+            resolved = [t for t in trades if t.get("outcome") in ("win", "loss")]
+            wins = sum(1 for t in resolved if t["outcome"] == "win")
+            losses = sum(1 for t in resolved if t["outcome"] == "loss")
+            total = wins + losses
+            total_pnl = sum(t.get("pnl_simulated", 0) or 0 for t in resolved)
+
+            return {
+                "trades": trades,
+                "summary": {
+                    "total": total,
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate": wins / total if total > 0 else 0,
+                    "total_pnl": round(total_pnl, 4),
+                    "expired": sum(1 for t in trades if t.get("outcome") == "expired"),
+                    "pending": sum(1 for t in trades if not t.get("outcome")),
+                },
+            }
+        finally:
+            await db.close()
+
     @router.get("/stats/daily")
     async def get_daily_stats(limit: int = 30):
         db = await get_db()

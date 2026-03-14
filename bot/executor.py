@@ -571,6 +571,7 @@ async def resolve_trade(trade_id: int, won: bool, bankroll: float,
             return bankroll
 
         # Polymarket taker fee on 5-min crypto markets: 10% (fee_rate_bps=1000)
+        # Confirmed: taker_base_fee=1000 on current BTC Up/Down 5-min markets.
         # Fee is charged on BUY (entry) and SELL (early exit), NOT on redemption
         TAKER_FEE = 0.10
 

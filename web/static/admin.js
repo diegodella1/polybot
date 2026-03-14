@@ -6,22 +6,22 @@ let adminTradeMode = 'all';
 // All config fields
 const FIELDS = [
     'max_trade_pct', 'base_trade_pct', 'min_trade_usd', 'max_exposure_usd',
-    'daily_loss_limit_pct', 'daily_profit_target_pct',
-    'trade_threshold', 'max_spread_cents', 'min_time_remaining_sec',
-    'max_consecutive_losses', 'cooldown_rounds', 'kelly_fraction',
+    'daily_loss_limit_pct',
+    'min_edge', 'max_edge', 'min_vol_5m', 'max_vol_5m',
+    'max_spread_cents', 'min_time_remaining_sec',
+    'max_consecutive_losses', 'cooldown_rounds',
     'min_entry_price', 'max_entry_price', 'stop_loss_pct', 'take_profit_pct',
-    'trade_cooldown_seconds', 'min_win_rate', 'circuit_breaker_window',
+    'trade_cooldown_seconds', 'post_loss_cooldown_seconds',
+    'min_win_rate', 'circuit_breaker_window',
     'circuit_breaker_hours', 'min_drawdown_multiplier', 'bankroll_floor_usd',
-    'min_estimated_winrate', 'max_estimated_winrate',
-    'dry_run', 'use_tp_sl', 'rag_enabled', 'invert_up_signal',
+    'dry_run', 'use_tp_sl', 'rag_enabled',
     'telegram_enabled', 'bot_enabled', 'binance_symbol',
 ];
 
-const BOOL_FIELDS = ['dry_run', 'use_tp_sl', 'rag_enabled', 'invert_up_signal', 'telegram_enabled', 'bot_enabled'];
+const BOOL_FIELDS = ['dry_run', 'use_tp_sl', 'rag_enabled', 'telegram_enabled', 'bot_enabled'];
 const INT_FIELDS = ['max_consecutive_losses', 'cooldown_rounds', 'max_spread_cents', 'min_time_remaining_sec',
-    'trade_cooldown_seconds', 'circuit_breaker_window', 'circuit_breaker_hours', 'bankroll_floor_usd'];
+    'trade_cooldown_seconds', 'post_loss_cooldown_seconds', 'circuit_breaker_window', 'circuit_breaker_hours', 'bankroll_floor_usd'];
 const TEXT_FIELDS = ['binance_symbol'];
-const WEIGHTS = ['momentum', 'book_skew', 'rsi'];
 
 // --- Auth ---
 async function authFetch(url, opts = {}) {
@@ -47,18 +47,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadStatus, 5000);
     setInterval(loadTrades, 15000);
     setInterval(loadStats, 30000);
-
-    // Weight sliders
-    for (const w of WEIGHTS) {
-        const slider = document.getElementById(`w_${w}`);
-        const val = document.getElementById(`wv_${w}`);
-        if (slider && val) {
-            slider.addEventListener('input', () => {
-                val.textContent = parseFloat(slider.value).toFixed(2);
-                updateWeightSum();
-            });
-        }
-    }
 
     // Trade mode filter
     document.getElementById('adminModeFilters').addEventListener('click', (e) => {
@@ -91,9 +79,9 @@ function updateStatusHero(d) {
     const badge = document.getElementById('statusBadge');
     const text = document.getElementById('statusText');
     if (d.running) {
-        badge.className = 'status-badge running';
-        const mode = d.dry_run ? 'DRY RUN' : 'LIVE';
-        text.textContent = `RUNNING \u00b7 ${mode}`;
+        const isLive = !d.dry_run;
+        badge.className = isLive ? 'status-badge running-live' : 'status-badge running';
+        text.textContent = isLive ? 'LIVE \u00b7 REAL $' : 'RUNNING \u00b7 DRY RUN';
     } else {
         badge.className = 'status-badge stopped';
         text.textContent = 'STOPPED';
@@ -107,8 +95,8 @@ function updateStatusHero(d) {
         modeBadge.style.color = 'var(--text-dim)';
     } else {
         modeBadge.textContent = 'LIVE TRADING';
-        modeBadge.style.background = 'var(--green-bg)';
-        modeBadge.style.color = 'var(--green)';
+        modeBadge.style.background = 'var(--red-bg)';
+        modeBadge.style.color = 'var(--red)';
     }
 
     // Hero cards
@@ -163,62 +151,17 @@ function updateStatusHero(d) {
 // =====================
 function updateSignals(sig) {
     if (!sig) return;
-    updateSignalBar('Mom', sig.momentum);
-    updateSignalBar('Skew', sig.book_skew);
-    updateSignalBar('RSI', sig.rsi);
-    updateGauge(sig.composite);
-}
-
-function updateSignalBar(id, value) {
-    const fill = document.getElementById(`sig${id}`);
-    const val = document.getElementById(`sig${id}Val`);
-    if (!fill || !val) return;
-
-    if (value == null) {
-        val.textContent = '\u2014';
-        val.style.color = 'var(--text-dim)';
-        fill.style.width = '0';
-        return;
+    // Fair Value signals
+    const edgeEl = document.getElementById('adminEdge');
+    if (edgeEl) {
+        const edge = sig.edge || 0;
+        edgeEl.textContent = `${(edge * 100).toFixed(1)}% ${sig.side ? sig.side.toUpperCase() : ''}`;
+        edgeEl.style.color = sig.has_edge ? 'var(--green)' : 'var(--text-dim)';
     }
-
-    val.textContent = value.toFixed(3);
-    val.style.color = value >= 0 ? 'var(--green)' : 'var(--red)';
-
-    const pct = Math.min(Math.abs(value) * 50, 50);
-    fill.style.width = `${pct}%`;
-
-    if (value >= 0) {
-        fill.className = 'signal-fill positive';
-        fill.style.left = '50%';
-        fill.style.right = 'auto';
-    } else {
-        fill.className = 'signal-fill negative';
-        fill.style.right = '50%';
-        fill.style.left = 'auto';
+    const probEl = document.getElementById('adminProb');
+    if (probEl && sig.prob_up != null) {
+        probEl.textContent = `P(up)=${(sig.prob_up * 100).toFixed(1)}%`;
     }
-}
-
-function updateGauge(value) {
-    const fill = document.getElementById('gaugeFill');
-    const label = document.getElementById('gaugeValue');
-    if (!fill || !label) return;
-
-    if (value == null) {
-        label.textContent = '\u2014';
-        label.style.color = 'var(--text-dim)';
-        fill.setAttribute('stroke-dashoffset', '314.16');
-        return;
-    }
-
-    const circumference = 314.16;
-    const normalized = (value + 1) / 2;
-    const offset = circumference * (1 - normalized);
-    fill.setAttribute('stroke-dashoffset', offset.toFixed(2));
-
-    const color = value >= 0.1 ? 'var(--green)' : value <= -0.1 ? 'var(--red)' : 'var(--accent)';
-    fill.setAttribute('stroke', color);
-    label.textContent = value.toFixed(3);
-    label.style.color = color;
 }
 
 // =====================
@@ -259,13 +202,6 @@ function updateRisk(d) {
     } else {
         cbEl.textContent = 'OK';
         cbEl.style.color = 'var(--green)';
-    }
-
-    const invertEl = document.getElementById('riskInvert');
-    if (invertEl) {
-        const on = d.invert_up_signal;
-        invertEl.textContent = on ? 'ON' : 'OFF';
-        invertEl.style.color = on ? 'var(--yellow)' : 'var(--text-dim)';
     }
 
     const tcdEl = document.getElementById('riskTradeCooldown');
@@ -357,17 +293,6 @@ async function loadConfig() {
             }
         }
 
-        if (cfg.weights) {
-            for (const w of WEIGHTS) {
-                const slider = document.getElementById(`w_${w}`);
-                const val = document.getElementById(`wv_${w}`);
-                if (slider && cfg.weights[w] != null) {
-                    slider.value = cfg.weights[w];
-                    val.textContent = parseFloat(cfg.weights[w]).toFixed(2);
-                }
-            }
-        }
-        updateWeightSum();
     } catch (e) {
         console.error('Config load failed:', e);
     }
@@ -389,12 +314,6 @@ async function saveConfig() {
         }
     }
 
-    cfg.weights = {};
-    for (const w of WEIGHTS) {
-        const slider = document.getElementById(`w_${w}`);
-        if (slider) cfg.weights[w] = parseFloat(slider.value);
-    }
-
     // Preserve non-editable fields
     try {
         const res = await authFetch(`${API}/api/config`);
@@ -414,38 +333,6 @@ async function saveConfig() {
         else showToast('Failed to save', 'error');
     } catch (e) {
         showToast('Network error', 'error');
-    }
-}
-
-// =====================
-// WEIGHT SUM
-// =====================
-function updateWeightSum() {
-    let sum = 0;
-    for (const w of WEIGHTS) {
-        const slider = document.getElementById(`w_${w}`);
-        if (slider) sum += parseFloat(slider.value);
-    }
-
-    const fill = document.getElementById('weightSumFill');
-    const label = document.getElementById('weightSumLabel');
-    if (!fill || !label) return;
-
-    fill.style.width = Math.min(sum * 100, 100) + '%';
-
-    const diff = Math.abs(sum - 1.0);
-    if (diff < 0.01) {
-        fill.className = 'weight-sum-fill';
-        label.className = 'weight-sum-label valid';
-        label.textContent = `Sum: ${sum.toFixed(2)} \u2714`;
-    } else if (sum > 1.0) {
-        fill.className = 'weight-sum-fill over';
-        label.className = 'weight-sum-label invalid';
-        label.textContent = `Sum: ${sum.toFixed(2)} (over!)`;
-    } else {
-        fill.className = 'weight-sum-fill under';
-        label.className = 'weight-sum-label invalid';
-        label.textContent = `Sum: ${sum.toFixed(2)} (under)`;
     }
 }
 

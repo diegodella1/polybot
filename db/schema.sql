@@ -47,6 +47,27 @@ CREATE TABLE IF NOT EXISTS patterns (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('up', 'down')),
+    prob_estimated REAL NOT NULL,
+    market_price REAL NOT NULL,
+    edge REAL NOT NULL,
+    vol_5m REAL,
+    drift_5m REAL,
+    price_up REAL,
+    price_down REAL,
+    btc_price REAL,
+    outcome TEXT CHECK(outcome IN ('win', 'loss', 'expired')),
+    pnl_simulated REAL,
+    resolved_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_outcome ON trades(outcome);
 CREATE INDEX IF NOT EXISTS idx_patterns_outcome ON patterns(outcome);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_outcome ON paper_trades(outcome);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_condition ON paper_trades(condition_id);

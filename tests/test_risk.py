@@ -61,7 +61,8 @@ class TestRiskCheck:
         assert "stopped" in result.reason.lower()
 
     @pytest.mark.asyncio
-    async def test_below_threshold(self, mock_state):
+    async def test_edge_passes_risk(self, mock_state):
+        """Edge filtering is now in engine, not risk. Risk should pass."""
         from bot.risk import check_risk
         mock_state.get = AsyncMock(side_effect=lambda k, d=None: {
             "enabled": True,
@@ -73,8 +74,7 @@ class TestRiskCheck:
         }.get(k, d))
 
         result = await check_risk(0.05, 100.0)
-        assert not result
-        assert "threshold" in result.reason.lower()
+        assert result
 
     @pytest.mark.asyncio
     async def test_bankroll_floor(self, mock_state):

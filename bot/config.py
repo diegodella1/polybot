@@ -20,7 +20,10 @@ _VALIDATORS = {
     "daily_loss_limit_pct": (0.01, 0.50),
     "min_drawdown_multiplier": (0.1, 1.0),
     "bankroll_floor_usd": (2.0, 50.0),
-    "trade_threshold": (0.01, 0.90),
+    "min_edge": (0.01, 0.20),
+    "max_edge": (0.02, 0.30),
+    "min_vol_5m": (0.0001, 0.01),
+    "max_vol_5m": (0.001, 0.05),
     "max_spread_cents": (1, 20),
     "min_time_remaining_sec": (10, 300),
     "max_consecutive_losses": (1, 20),
@@ -30,9 +33,8 @@ _VALIDATORS = {
     "stop_loss_pct": (0.05, 0.90),
     "take_profit_pct": (0.05, 2.00),
     "min_win_rate": (0, 0.60),
-    "min_estimated_winrate": (0.50, 0.70),
-    "max_estimated_winrate": (0.55, 0.80),
     "trade_cooldown_seconds": (0, 3600),
+    "post_loss_cooldown_seconds": (0, 3600),
 }
 
 
@@ -49,16 +51,6 @@ def _validate_config(cfg: dict) -> dict:
                         key, val, lo, hi, clamped,
                     )
                     cfg[key] = clamped
-
-    # Validate weight values
-    weights = cfg.get("weights", {})
-    if isinstance(weights, dict):
-        for wk, wv in weights.items():
-            if isinstance(wv, (int, float)):
-                clamped = max(0.0, min(1.0, wv))
-                if clamped != wv:
-                    logger.warning("Weight '%s' = %s clamped to [0, 1]", wk, wv)
-                    weights[wk] = clamped
 
     return cfg
 

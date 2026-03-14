@@ -7,7 +7,7 @@
     <link rel="manifest" href="/static/manifest.json">
     <meta name="theme-color" content="#8b5cf6">
     <link rel="apple-touch-icon" href="/static/icon-192.png">
-    <link rel="stylesheet" href="/static/style.css?v=15">
+    <link rel="stylesheet" href="/static/style.css?v=18">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
@@ -133,6 +133,48 @@
             </div>
         </div>
 
+        <!-- Fair Value Paper Trading -->
+        <div class="card" style="margin-bottom: 20px" id="paperSection">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="card-header" style="margin:0">Paper Validation</div>
+                <span class="badge badge-paper" id="paperStatus">--</span>
+            </div>
+            <div class="grid grid-4" style="margin:12px 0 8px" id="paperStats">
+                <div style="text-align:center">
+                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Trades</div>
+                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono)" id="paperTotal">0</div>
+                </div>
+                <div style="text-align:center">
+                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Win Rate</div>
+                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono)" id="paperWR">--</div>
+                </div>
+                <div style="text-align:center">
+                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Sim P&amp;L</div>
+                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono)" id="paperPnl">$0.00</div>
+                </div>
+                <div style="text-align:center">
+                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Pending</div>
+                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono);color:var(--text-dim)" id="paperPending">0</div>
+                </div>
+            </div>
+            <div class="table-wrap" style="max-height:200px">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Side</th>
+                            <th>P(est)</th>
+                            <th>Mkt</th>
+                            <th>Edge</th>
+                            <th>Vol</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="paperBody"></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Trades + Signals/Risk -->
         <div class="grid grid-2">
             <!-- Live Trades -->
@@ -165,49 +207,49 @@
 
             <!-- Signals + Risk column -->
             <div>
-                <!-- Signal Panel -->
+                <!-- Fair Value Panel -->
                 <div class="card" style="margin-bottom: 16px">
-                    <div class="card-header">Signals</div>
+                    <div class="card-header">Fair Value Model</div>
 
-                    <!-- Composite Gauge -->
-                    <div class="gauge-wrap">
-                        <svg class="gauge-svg" viewBox="0 0 120 120">
-                            <circle class="gauge-bg" cx="60" cy="60" r="50" />
-                            <circle class="gauge-fill" id="gaugeFill" cx="60" cy="60" r="50"
-                                stroke-dasharray="314.16" stroke-dashoffset="314.16" />
-                        </svg>
-                        <div class="gauge-label">Composite</div>
-                        <div class="gauge-value" id="gaugeValue">&mdash;</div>
-                        <div class="gauge-explanation" id="gaugeExplanation">Calculando señales...</div>
+                    <!-- Edge + Side hero -->
+                    <div class="fv-hero" id="fvHero">
+                        <div class="fv-side" id="fvSide">&mdash;</div>
+                        <div class="fv-edge-row">
+                            <span class="fv-edge-label">Edge</span>
+                            <span class="fv-edge-value" id="fvEdge">&mdash;</span>
+                        </div>
+                        <div class="fv-explanation" id="fvExplanation">Calculando fair value...</div>
                     </div>
 
                     <hr class="divider">
 
-                    <!-- Individual signals -->
-                    <div id="signalsPanel">
-                        <div class="signal-bar">
-                            <div class="signal-label-wrap">
-                                <span class="signal-label">Momentum</span>
-                                <span class="signal-desc">Dirección del precio de BTC en los últimos minutos</span>
-                            </div>
-                            <div class="signal-track"><div class="signal-fill" id="sigMom"></div></div>
-                            <span class="signal-value" id="sigMomVal">&mdash;</span>
+                    <!-- FV metrics as compact grid -->
+                    <div class="fv-metrics">
+                        <div class="fv-metric">
+                            <div class="fv-metric-label">P(up)</div>
+                            <div class="fv-metric-value" id="fvProbUp">&mdash;</div>
+                            <div class="fv-metric-bar"><div class="fv-metric-fill" id="fvProbUpBar" style="width:50%"></div></div>
                         </div>
-                        <div class="signal-bar">
-                            <div class="signal-label-wrap">
-                                <span class="signal-label">Book Skew</span>
-                                <span class="signal-desc">Balance de compradores vs vendedores en Polymarket</span>
-                            </div>
-                            <div class="signal-track"><div class="signal-fill" id="sigSkew"></div></div>
-                            <span class="signal-value" id="sigSkewVal">&mdash;</span>
+                        <div class="fv-metric">
+                            <div class="fv-metric-label">P(down)</div>
+                            <div class="fv-metric-value" id="fvProbDown">&mdash;</div>
+                            <div class="fv-metric-bar"><div class="fv-metric-fill down" id="fvProbDownBar" style="width:50%"></div></div>
                         </div>
-                        <div class="signal-bar">
-                            <div class="signal-label-wrap">
-                                <span class="signal-label">RSI</span>
-                                <span class="signal-desc">Fuerza relativa: sobrecompra/sobreventa de BTC</span>
-                            </div>
-                            <div class="signal-track"><div class="signal-fill" id="sigRSI"></div></div>
-                            <span class="signal-value" id="sigRSIVal">&mdash;</span>
+                        <div class="fv-metric">
+                            <div class="fv-metric-label">Vol σ</div>
+                            <div class="fv-metric-value" id="fvVol">&mdash;</div>
+                        </div>
+                        <div class="fv-metric">
+                            <div class="fv-metric-label">Drift μ</div>
+                            <div class="fv-metric-value" id="fvDrift">&mdash;</div>
+                        </div>
+                        <div class="fv-metric">
+                            <div class="fv-metric-label">Mkt UP</div>
+                            <div class="fv-metric-value" id="fvMktUp">&mdash;</div>
+                        </div>
+                        <div class="fv-metric">
+                            <div class="fv-metric-label">Mkt DOWN</div>
+                            <div class="fv-metric-value" id="fvMktDown">&mdash;</div>
                         </div>
                     </div>
                 </div>
@@ -217,14 +259,14 @@
                     <div class="card-header">Risk Status</div>
                     <div id="riskPanel">
                         <div class="risk-item">
-                            <div class="risk-icon blue">&#x1f4ca;</div>
+                            <div class="risk-icon blue">#</div>
                             <div class="risk-info">
                                 <div class="label">Loss Streak</div>
                                 <div class="value" id="riskStreak">0</div>
                             </div>
                         </div>
                         <div class="risk-item">
-                            <div class="risk-icon green">&#x1f4b0;</div>
+                            <div class="risk-icon green">$</div>
                             <div class="risk-info">
                                 <div class="label">Daily Loss</div>
                                 <div class="value" id="riskDailyLoss">$0.00</div>
@@ -232,35 +274,28 @@
                             </div>
                         </div>
                         <div class="risk-item">
-                            <div class="risk-icon green">&#x1f4c9;</div>
+                            <div class="risk-icon green">&times;</div>
                             <div class="risk-info">
                                 <div class="label">Sizing Mult</div>
                                 <div class="value" id="riskDrawdown">1.00x</div>
                             </div>
                         </div>
                         <div class="risk-item">
-                            <div class="risk-icon yellow">&#x23f1;</div>
+                            <div class="risk-icon yellow">||</div>
                             <div class="risk-info">
                                 <div class="label">Cooldown</div>
                                 <div class="value" id="riskCooldown">No</div>
                             </div>
                         </div>
                         <div class="risk-item">
-                            <div class="risk-icon green">&#x26a1;</div>
+                            <div class="risk-icon green">!</div>
                             <div class="risk-info">
                                 <div class="label">Circuit Breaker</div>
                                 <div class="value text-green" id="riskCircuit">OK</div>
                             </div>
                         </div>
                         <div class="risk-item">
-                            <div class="risk-icon yellow">&#x1f504;</div>
-                            <div class="risk-info">
-                                <div class="label">Invert UP</div>
-                                <div class="value" id="riskInvert">OFF</div>
-                            </div>
-                        </div>
-                        <div class="risk-item">
-                            <div class="risk-icon blue">&#x23f3;</div>
+                            <div class="risk-icon blue">~</div>
                             <div class="risk-info">
                                 <div class="label">Trade CD</div>
                                 <div class="value" id="riskTradeCooldown">0s</div>
@@ -277,6 +312,6 @@
         &nbsp;&middot;&nbsp; NFA &middot; DYOR &middot; Use at your own risk
     </div>
 
-    <script src="/static/dashboard.js?v=29"></script>
+    <script src="/static/dashboard.js?v=34"></script>
 </body>
 </html>

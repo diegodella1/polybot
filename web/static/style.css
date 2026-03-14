@@ -15,7 +15,7 @@
 
     /* Text */
     --text: #e8e8f0;
-    --text-secondary: #a0a0b8;
+    --text-secondary: #b8b8d0;
     --text-dim: #6a6a82;
 
     /* Colors */
@@ -173,6 +173,28 @@ header h1 {
     background: var(--green-bg);
     color: var(--green);
     box-shadow: var(--shadow-glow-green);
+}
+
+.status-badge.running-live {
+    background: var(--red-bg);
+    color: var(--red);
+    box-shadow: 0 0 20px var(--red-glow), 0 0 40px rgba(239,68,68,0.15);
+    animation: pulse-live-badge 2s ease-in-out infinite;
+}
+
+.running-live .status-dot {
+    background: var(--red);
+    animation: pulse-glow-red 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-live-badge {
+    0%, 100% { box-shadow: 0 0 20px var(--red-glow), 0 0 40px rgba(239,68,68,0.15); }
+    50% { box-shadow: 0 0 30px var(--red-glow), 0 0 60px rgba(239,68,68,0.2); }
+}
+
+@keyframes pulse-glow-red {
+    0%, 100% { opacity: 1; box-shadow: 0 0 6px var(--red); }
+    50% { opacity: 0.5; box-shadow: none; }
 }
 
 .status-badge.stopped {
@@ -423,7 +445,7 @@ tr:hover { background: var(--surface-hover); }
 /* ===== Goal Tracker ===== */
 .goal-bar {
     padding: 10px 20px;
-    background: var(--surface-1);
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
 }
 
@@ -548,137 +570,106 @@ tr.flash { animation: flash-row 1.5s var(--ease-smooth); }
     50% { opacity: 0.4; }
 }
 
-/* ===== Signal Bars ===== */
-.signal-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin: 8px 0;
+/* ===== Fair Value Panel ===== */
+.fv-hero {
+    text-align: center;
+    padding: 16px 12px 12px;
 }
 
-.signal-label-wrap {
-    width: 90px;
-    flex-shrink: 0;
-}
-
-.signal-label {
-    font-family: var(--font-sans);
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-weight: 500;
-    display: block;
-}
-
-.signal-desc {
-    font-family: var(--font-sans);
-    font-size: 9px;
+.fv-side {
+    font-family: var(--font-mono);
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: 2px;
     color: var(--text-dim);
-    line-height: 1.3;
-    display: block;
-    margin-top: 1px;
+    margin-bottom: 4px;
+    transition: color 0.3s;
 }
 
-.signal-track {
-    flex: 1;
-    height: 8px;
-    background: var(--surface-3);
-    border-radius: 4px;
-    position: relative;
-    overflow: hidden;
-}
+.fv-side.up { color: var(--green); }
+.fv-side.down { color: var(--red); }
+.fv-side.none { color: var(--text-dim); }
 
-/* Center line */
-.signal-track::after {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 0;
-    bottom: 0;
-    width: 1px;
-    background: var(--text-dim);
-    opacity: 0.3;
-    z-index: 1;
-}
-
-.signal-fill {
-    position: absolute;
-    top: 0;
-    height: 100%;
-    border-radius: 4px;
-    transition: width var(--duration-slow) var(--ease-spring), left var(--duration-slow) var(--ease-spring);
-}
-
-.signal-fill.positive {
-    left: 50%;
-    background: linear-gradient(90deg, var(--green), #34d399);
-    box-shadow: 0 0 8px var(--green-glow);
-}
-
-.signal-fill.negative {
-    background: linear-gradient(270deg, var(--red), #f87171);
-    box-shadow: 0 0 8px var(--red-glow);
-}
-
-.signal-value {
-    width: 55px;
-    text-align: right;
-    font-size: 12px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-}
-
-/* ===== Composite Gauge (SVG) ===== */
-.gauge-wrap {
+.fv-edge-row {
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 12px 0;
+    align-items: baseline;
+    justify-content: center;
+    gap: 6px;
 }
 
-.gauge-svg {
-    width: 120px;
-    height: 120px;
-    transform: rotate(-90deg);
-}
-
-.gauge-bg {
-    fill: none;
-    stroke: var(--surface-3);
-    stroke-width: 8;
-}
-
-.gauge-fill {
-    fill: none;
-    stroke-width: 8;
-    stroke-linecap: round;
-    transition: stroke-dashoffset var(--duration-slow) var(--ease-spring), stroke var(--duration);
-    filter: drop-shadow(0 0 6px var(--accent-glow));
-}
-
-.gauge-label {
+.fv-edge-label {
     font-family: var(--font-sans);
     font-size: 11px;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-top: 8px;
+    letter-spacing: 0.5px;
 }
 
-.gauge-value {
+.fv-edge-value {
+    font-family: var(--font-mono);
     font-size: 22px;
     font-weight: 700;
-    margin-top: 4px;
-    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    transition: color 0.3s;
 }
 
-.gauge-explanation {
+.fv-explanation {
     font-family: var(--font-sans);
     font-size: 11px;
     color: var(--text-dim);
-    margin-top: 6px;
-    text-align: center;
-    max-width: 220px;
+    margin-top: 8px;
     line-height: 1.4;
+}
+
+.fv-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    padding: 4px 0;
+}
+
+.fv-metric {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.fv-metric:nth-last-child(-n+2) {
+    border-bottom: none;
+}
+
+.fv-metric-label {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 2px;
+}
+
+.fv-metric-value {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.fv-metric-bar {
+    height: 3px;
+    background: var(--surface-3);
+    border-radius: 2px;
+    margin-top: 4px;
+    overflow: hidden;
+}
+
+.fv-metric-fill {
+    height: 100%;
+    background: var(--green);
+    border-radius: 2px;
+    transition: width 0.5s ease;
+}
+
+.fv-metric-fill.down {
+    background: var(--red);
 }
 
 /* ===== Risk Panel ===== */
@@ -699,7 +690,9 @@ tr.flash { animation: flash-row 1.5s var(--ease-smooth); }
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
     font-size: 14px;
+    font-weight: 700;
     flex-shrink: 0;
 }
 
@@ -841,81 +834,6 @@ tr.flash { animation: flash-row 1.5s var(--ease-smooth); }
 }
 
 .form-input-wide { width: 240px; }
-
-/* ===== Weight Slider ===== */
-.weight-slider {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 0;
-}
-
-.weight-slider label {
-    width: 100px;
-    font-family: var(--font-sans);
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-
-.weight-slider input[type="range"] {
-    flex: 1;
-    height: 6px;
-    -webkit-appearance: none;
-    appearance: none;
-    background: var(--surface-3);
-    border-radius: 3px;
-    outline: none;
-}
-
-.weight-slider input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    box-shadow: 0 0 8px var(--accent-glow);
-}
-
-.weight-slider .weight-val {
-    width: 45px;
-    text-align: right;
-    font-size: 13px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: var(--accent);
-}
-
-/* Weight sum indicator */
-.weight-sum-bar {
-    height: 4px;
-    background: var(--surface-3);
-    border-radius: 2px;
-    margin-top: 12px;
-    overflow: hidden;
-    position: relative;
-}
-
-.weight-sum-fill {
-    height: 100%;
-    border-radius: 2px;
-    transition: width var(--duration), background var(--duration);
-    background: var(--green);
-}
-
-.weight-sum-fill.over { background: var(--red); }
-.weight-sum-fill.under { background: var(--yellow); }
-
-.weight-sum-label {
-    font-family: var(--font-sans);
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-top: 6px;
-    text-align: right;
-}
-
-.weight-sum-label.valid { color: var(--green); }
-.weight-sum-label.invalid { color: var(--red); }
 
 /* ===== Admin Sections (always visible) ===== */
 .admin-section {
@@ -1218,8 +1136,10 @@ tr.flash { animation: flash-row 1.5s var(--ease-smooth); }
     .grid-4, .grid-3 { grid-template-columns: repeat(2, 1fr); }
     header { padding: 0 16px; }
     .container { padding: 16px 12px; }
-    .btc-ticker { display: none; }
+    .btc-ticker { font-size: 11px; padding: 2px 8px; gap: 5px; }
     .form-input-wide { width: 160px; }
+    .chart-filter-btn { padding: 6px 12px; min-height: 32px; }
+    .fv-metrics { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 480px) {
@@ -1229,6 +1149,13 @@ tr.flash { animation: flash-row 1.5s var(--ease-smooth); }
     header h1 { font-size: 14px; }
     .btn-group { flex-direction: column; }
     .btn-group .btn { width: 100%; }
+    .chart-filters { flex-wrap: wrap; }
+    .chart-filter-btn { padding: 8px 14px; min-height: 36px; font-size: 11px; }
+    .stats-date-filter { flex-wrap: wrap; }
+    .fv-side { font-size: 22px; }
+    .fv-edge-value { font-size: 18px; }
+    .live-status-grid { grid-template-columns: 1fr; }
+    .ls-item { border-right: none; }
 }
 
 /* ===== Stats Date Filter ===== */

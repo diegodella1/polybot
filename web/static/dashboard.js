@@ -8,7 +8,7 @@ let allTrades = [];       // full trade list for chart filtering
 let chartRange = '7d';    // current chart filter
 let tradeMode = 'all';   // paper | live | all
 let prevBtcPrice = null;
-let currentTradeThreshold = 0.06;
+
 let roundCount = 0;
 let statsDateFilter = 'all'; // 'all' | 'today' | 'YYYY-MM-DD'
 let lastStatusData = null;   // cache for re-rendering filtered stats
@@ -44,10 +44,12 @@ document.addEventListener('DOMContentLoaded', () => {
     initChart();
     fetchStatus();
     fetchTrades();
+    fetchPaperTrades();
     connectWS();
     fetchBtcPrice();
     setInterval(fetchStatus, 5000);
     setInterval(fetchTrades, 15000);
+    setInterval(fetchPaperTrades, 15000);
     setInterval(fetchBtcPrice, 15000);
 
     // Chart range filters
@@ -222,16 +224,14 @@ function animateValue(el, end, prefix, suffix, decimals) {
 // --- Update UI ---
 function updateStatus(data) {
     // Sync trade threshold from config
-    if (data.trade_threshold) currentTradeThreshold = data.trade_threshold;
-
     // Status badge
     const badge = document.getElementById('statusBadge');
     const text = document.getElementById('statusText');
 
     if (data.running) {
-        badge.className = 'status-badge running';
-        const mode = data.dry_run ? 'DRY RUN' : 'LIVE';
-        text.textContent = `RUNNING \u00b7 ${mode}`;
+        const isLive = !data.dry_run;
+        badge.className = isLive ? 'status-badge running-live' : 'status-badge running';
+        text.textContent = isLive ? 'LIVE \u00b7 REAL $' : 'RUNNING \u00b7 DRY RUN';
     } else {
         badge.className = 'status-badge stopped';
         text.textContent = 'STOPPED';
@@ -240,6 +240,22 @@ function updateStatus(data) {
     // Training mode banner
     const tb = document.getElementById('trainingBanner');
     if (tb) tb.style.display = data.dry_run ? 'block' : 'none';
+
+    // Paper validation badge
+    const paperBadge = document.getElementById('paperStatus');
+    if (paperBadge) {
+        if (!data.running) {
+            paperBadge.textContent = 'OFFLINE';
+            paperBadge.className = 'badge badge-paper';
+        } else if (data.dry_run) {
+            paperBadge.textContent = 'PAPER ONLY';
+            paperBadge.className = 'badge badge-paper';
+        } else {
+            paperBadge.textContent = 'SHADOW';
+            paperBadge.className = 'badge badge-paper';
+            paperBadge.style.color = 'var(--text-secondary)';
+        }
+    }
 
     // Wallet Real (on-chain balance — the real number)
     const bankroll = data.bankroll || 0;
@@ -341,16 +357,6 @@ function updateStatus(data) {
         cbEl.style.color = 'var(--green)';
     }
 
-    // Invert UP signal flag
-    const invertEl = document.getElementById('riskInvert');
-    if (invertEl) {
-        const on = data.invert_up_signal;
-        invertEl.textContent = on ? 'ON' : 'OFF';
-        invertEl.style.color = on ? 'var(--yellow)' : 'var(--text-dim)';
-        const invertIcon = invertEl.closest('.risk-item')?.querySelector('.risk-icon');
-        if (invertIcon) invertIcon.className = 'risk-icon ' + (on ? 'yellow' : 'green');
-    }
-
     // Trade cooldown
     const tcdEl = document.getElementById('riskTradeCooldown');
     if (tcdEl) {
@@ -363,97 +369,76 @@ function updateStatus(data) {
     if (data.signals) handleSignal(data.signals);
 }
 
-// --- Signals ---
+// --- Signals (Fair Value) ---
 function handleSignal(sig) {
-    updateSignalBar('Mom', sig.momentum);
-    updateSignalBar('Skew', sig.book_skew);
-    updateSignalBar('RSI', sig.rsi);
-    updateGauge(sig.composite);
-    updateGaugeExplanation(sig.composite);
-}
+    if (!sig) return;
 
-function updateSignalBar(id, value) {
-    const fill = document.getElementById(`sig${id}`);
-    const val = document.getElementById(`sig${id}Val`);
-    if (!fill || !val) return;
-
-    if (value == null) {
-        val.textContent = '\u2014';
-        val.style.color = 'var(--text-dim)';
-        fill.style.width = '0';
-        return;
+    // Side indicator
+    const sideEl = document.getElementById('fvSide');
+    if (sideEl) {
+        if (sig.has_edge && sig.side) {
+            sideEl.textContent = sig.side.toUpperCase();
+            sideEl.className = 'fv-side ' + sig.side;
+        } else {
+            sideEl.textContent = '\u2014';
+            sideEl.className = 'fv-side none';
+        }
     }
 
-    val.textContent = value.toFixed(3);
-    val.style.color = value >= 0 ? 'var(--green)' : 'var(--red)';
-
-    const pct = Math.min(Math.abs(value) * 50, 50);
-    fill.style.width = `${pct}%`;
-
-    if (value >= 0) {
-        fill.className = 'signal-fill positive';
-        fill.style.left = '50%';
-        fill.style.right = 'auto';
-    } else {
-        fill.className = 'signal-fill negative';
-        fill.style.right = '50%';
-        fill.style.left = 'auto';
-    }
-}
-
-function updateGauge(value) {
-    const fill = document.getElementById('gaugeFill');
-    const label = document.getElementById('gaugeValue');
-    if (!fill || !label) return;
-
-    if (value == null) {
-        label.textContent = '\u2014';
-        label.style.color = 'var(--text-dim)';
-        fill.setAttribute('stroke-dashoffset', '314.16');
-        return;
+    // Edge value
+    const edgeEl = document.getElementById('fvEdge');
+    if (edgeEl) {
+        const pct = (sig.edge * 100).toFixed(1);
+        edgeEl.textContent = sig.edge > 0 ? `+${pct}%` : `${pct}%`;
+        edgeEl.style.color = sig.has_edge ? 'var(--green)' : sig.edge > 0 ? 'var(--yellow)' : 'var(--text-dim)';
     }
 
-    // Circumference = 2 * PI * 50 = 314.16
-    const circumference = 314.16;
-    // Map -1..+1 to 0..100%
-    const normalized = (value + 1) / 2; // 0..1
-    const offset = circumference * (1 - normalized);
+    // Explanation
+    const explEl = document.getElementById('fvExplanation');
+    if (explEl) {
+        if (sig.has_edge && sig.side) {
+            explEl.textContent = `Tradeable: P(${sig.side}) supera breakeven + fee`;
+            explEl.style.color = 'var(--green)';
+        } else if (sig.edge > 0) {
+            explEl.textContent = `Edge insuficiente (fuera de banda 4-8%)`;
+            explEl.style.color = 'var(--yellow)';
+        } else {
+            explEl.textContent = 'Sin edge detectado';
+            explEl.style.color = 'var(--text-dim)';
+        }
+    }
 
-    fill.setAttribute('stroke-dashoffset', offset.toFixed(2));
+    // Probability bars
+    const probUp = sig.prob_up || 0.5;
+    const probDown = sig.prob_down || 0.5;
+    setMetric('fvProbUp', (probUp * 100).toFixed(1) + '%', probUp > 0.55 ? 'var(--green)' : null);
+    setMetric('fvProbDown', (probDown * 100).toFixed(1) + '%', probDown > 0.55 ? 'var(--red)' : null);
+    setBar('fvProbUpBar', probUp * 100);
+    setBar('fvProbDownBar', probDown * 100);
 
-    // Color based on value
-    const color = value >= 0.1 ? 'var(--green)' : value <= -0.1 ? 'var(--red)' : 'var(--accent)';
-    fill.setAttribute('stroke', color);
-    fill.style.filter = `drop-shadow(0 0 6px ${value >= 0.1 ? 'var(--green-glow)' : value <= -0.1 ? 'var(--red-glow)' : 'var(--accent-glow)'})`;
+    // Vol and drift
+    setMetric('fvVol', sig.vol_5m != null ? (sig.vol_5m * 100).toFixed(4) + '%' : '\u2014');
+    setMetric('fvDrift', sig.drift_5m != null ? (sig.drift_5m > 0 ? '+' : '') + (sig.drift_5m * 100).toFixed(4) + '%' : '\u2014',
+        sig.drift_5m > 0 ? 'var(--green)' : sig.drift_5m < 0 ? 'var(--red)' : null);
 
-    label.textContent = value.toFixed(3);
-    label.style.color = color;
+    // Market prices
+    setMetric('fvMktUp', sig.price_up != null ? (sig.price_up * 100).toFixed(1) + '\u00a2' : '\u2014');
+    setMetric('fvMktDown', sig.price_down != null ? (sig.price_down * 100).toFixed(1) + '\u00a2' : '\u2014');
 }
 
-// --- Gauge Explanation ---
-function updateGaugeExplanation(value) {
-    const el = document.getElementById('gaugeExplanation');
+function setMetric(id, text, color) {
+    const el = document.getElementById(id);
     if (!el) return;
-
-    if (value == null) {
-        el.textContent = 'Calculando señales...';
-        el.style.color = 'var(--text-dim)';
-        return;
-    }
-
-    const threshold = currentTradeThreshold || 0.06;
-    if (Math.abs(value) >= threshold) {
-        const dir = value > 0 ? 'UP' : 'DOWN';
-        el.textContent = `Señal tradeable (${Math.abs(value).toFixed(3)} ≥ ${threshold}) — ${dir}`;
-        el.style.color = 'var(--green)';
-    } else if (value === 0) {
-        el.textContent = 'Calculando señales...';
-        el.style.color = 'var(--text-dim)';
-    } else {
-        el.textContent = `Señal débil (${Math.abs(value).toFixed(3)} < ${threshold})`;
-        el.style.color = 'var(--yellow)';
-    }
+    el.textContent = text;
+    if (color) el.style.color = color;
+    else el.style.color = '';
 }
+
+function setBar(id, pct) {
+    const el = document.getElementById(id);
+    if (el) el.style.width = Math.min(Math.max(pct, 0), 100) + '%';
+}
+
 
 // --- Live Status Panel ---
 function handleRoundUpdate(data) {
@@ -809,6 +794,74 @@ function renderWinRate(trades) {
     } else {
         document.getElementById('winRate').textContent = '\u2014';
         document.getElementById('winRateSub').textContent = '0 trades';
+    }
+}
+
+// --- Paper Trades (Fair Value) ---
+async function fetchPaperTrades() {
+    try {
+        const res = await fetch(`${API}/api/paper-trades?limit=50`);
+        const data = await res.json();
+        renderPaperTrades(data);
+    } catch (e) {
+        console.error('Paper trades fetch failed:', e);
+    }
+}
+
+function renderPaperTrades(data) {
+    const { trades, summary } = data;
+
+    // Stats
+    const el = (id) => document.getElementById(id);
+    el('paperTotal').textContent = summary.total;
+
+    if (summary.total > 0) {
+        const wr = (summary.win_rate * 100).toFixed(1) + '%';
+        el('paperWR').textContent = wr;
+        el('paperWR').style.color = summary.win_rate >= 0.55 ? 'var(--green)' : summary.win_rate >= 0.45 ? 'var(--yellow)' : 'var(--red)';
+    } else {
+        el('paperWR').textContent = '--';
+        el('paperWR').style.color = '';
+    }
+
+    const pnl = summary.total_pnl || 0;
+    el('paperPnl').textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    el('paperPnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+    el('paperPending').textContent = summary.pending;
+
+    // Table
+    const body = el('paperBody');
+    body.innerHTML = '';
+    for (const t of trades.slice(0, 15)) {
+        const tr = document.createElement('tr');
+        const time = t.timestamp
+            ? new Date(t.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+            : '';
+        const sideClass = t.side === 'up' ? 'side-up' : 'side-down';
+        const sideLabel = t.side === 'up' ? 'UP' : 'DN';
+
+        let resultHtml;
+        if (t.outcome === 'win') {
+            resultHtml = `<span class="badge badge-win">WIN</span>`;
+        } else if (t.outcome === 'loss') {
+            resultHtml = `<span class="badge badge-loss">LOSS</span>`;
+        } else if (t.outcome === 'expired') {
+            resultHtml = `<span class="badge badge-pending" style="opacity:0.4">EXP</span>`;
+        } else {
+            resultHtml = `<span class="badge badge-pending">...</span>`;
+        }
+
+        tr.innerHTML = `
+            <td>${time}</td>
+            <td class="${sideClass}">${sideLabel}</td>
+            <td>${(t.prob_estimated * 100).toFixed(0)}%</td>
+            <td>${(t.market_price * 100).toFixed(0)}\u00a2</td>
+            <td style="color:var(--green)">+${(t.edge * 100).toFixed(1)}%</td>
+            <td>${t.vol_5m ? (t.vol_5m * 100).toFixed(2) + '%' : '--'}</td>
+            <td>${resultHtml}</td>
+        `;
+        body.appendChild(tr);
     }
 }
 

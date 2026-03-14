@@ -47,16 +47,15 @@ def kelly_size(
         no_trade["reason"] = f"Bankroll ${bankroll:.2f} below floor ${bankroll_floor:.2f}"
         return no_trade
 
-    # Signal-proportional sizing:
-    # At threshold → base_pct, at strong signal → max_trade_pct
-    sig = abs(signal_strength)
-    threshold = get("trade_threshold", 0.06)
+    # Edge-proportional sizing:
+    # At min_edge → base_pct, at max_edge → max_trade_pct
+    edge = abs(signal_strength)
+    min_edge = get("min_edge", 0.03)
+    max_edge_cfg = get("max_edge", 0.12)
     base_pct = get("base_trade_pct", 0.07)
     max_trade_pct = get("max_trade_pct", 0.12)
 
-    # Linear interpolation using real range: threshold → 0.5 (strong signal)
-    max_sig = 0.5
-    t = min((sig - threshold) / (max_sig - threshold), 1.0) if sig > threshold else 0.0
+    t = min((edge - min_edge) / (max_edge_cfg - min_edge), 1.0) if edge > min_edge else 0.0
     fraction = base_pct + t * (max_trade_pct - base_pct)
 
     size_usd = bankroll * fraction

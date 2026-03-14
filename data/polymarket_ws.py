@@ -257,3 +257,36 @@ class PolymarketWS:
         self._running = False
         if self._ws:
             await self._ws.close()
+
+
+async def fetch_orderbook_snapshot(token_id: str) -> OrderbookSnapshot:
+    """Fetch orderbook via REST without mutating any shared state.
+
+    Returns a standalone OrderbookSnapshot (empty if fetch fails).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"{CLOB_REST}/book",
+                params={"token_id": token_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        bids = PolymarketWS._parse_levels(data.get("bids") or [])
+        asks = PolymarketWS._parse_levels(data.get("asks") or [])
+        bids.sort(key=lambda x: -x[0])
+        asks.sort(key=lambda x: x[0])
+
+        if bids or asks:
+            logger.debug(
+                "REST snapshot %s: %d bids, %d asks",
+                token_id[:16], len(bids), len(asks),
+            )
+            return OrderbookSnapshot(
+                bids=bids, asks=asks, timestamp=time.time(),
+            )
+    except Exception as e:
+        logger.warning("REST orderbook snapshot failed for %s: %s", token_id[:16], e)
+
+    return OrderbookSnapshot()
