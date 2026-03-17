@@ -4,6 +4,9 @@ import os
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "polybot.db")
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
+# Current schema version — bump when adding new migrations
+SCHEMA_VERSION = 2
+
 
 async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(DB_PATH)
@@ -51,5 +54,83 @@ async def init_db():
             )
         """)
         await db.commit()
+
+        # Run versioned migrations
+        await _run_migrations(db)
     finally:
         await db.close()
+
+
+async def _run_migrations(db: aiosqlite.Connection):
+    """Run incremental migrations using PRAGMA user_version."""
+    cursor = await db.execute("PRAGMA user_version")
+    row = await cursor.fetchone()
+    current_version = row[0] if row else 0
+
+    if current_version < 2:
+        await _migrate_v2(db)
+
+    if current_version < SCHEMA_VERSION:
+        await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        await db.commit()
+
+
+async def _migrate_v2(db: aiosqlite.Connection):
+    """Schema v2: strategy v2 columns and tables."""
+    # New columns in trades (all nullable for backward compat)
+    for col_sql in [
+        "ALTER TABLE trades ADD COLUMN tau_at_entry REAL",
+        "ALTER TABLE trades ADD COLUMN best_price_at_decision REAL",
+        "ALTER TABLE trades ADD COLUMN fill_slippage REAL",
+        "ALTER TABLE trades ADD COLUMN phat_at_entry REAL",
+        "ALTER TABLE trades ADD COLUMN residual REAL",
+    ]:
+        try:
+            await db.execute(col_sql)
+        except Exception:
+            pass  # Column already exists
+
+    # Decisions telemetry table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            market TEXT,
+            decision TEXT NOT NULL,
+            tau REAL,
+            delta_pct REAL,
+            sigma_pct REAL,
+            q_yes REAL,
+            spread REAL,
+            p0 REAL,
+            p_ob REAL,
+            p_hat REAL,
+            p_hat_low REAL,
+            p_req REAL,
+            edge REAL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Slippage events table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS slippage_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER REFERENCES trades(id),
+            best_at_decision REAL NOT NULL,
+            fill_price REAL NOT NULL,
+            slippage REAL NOT NULL,
+            tick_size REAL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Indices
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(ts)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_slippage_trade ON slippage_events(trade_id)"
+    )
+
+    await db.commit()

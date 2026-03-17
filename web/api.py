@@ -442,6 +442,70 @@ def create_router(engine, ws_manager) -> APIRouter:
             "details": result.details,
         }
 
+    # --- Analytics endpoints (v2) ---
+
+    @router.get("/stats/by-hour")
+    async def stats_by_hour(days: int = 30, mode: str = "all"):
+        """Trades/wins/pnl grouped by UTC hour (for schedule analysis)."""
+        db = await get_db()
+        try:
+            mode_cond = _mode_filter(mode, prefix="AND")
+            cursor = await db.execute(
+                f"""SELECT
+                    CAST(strftime('%H', timestamp) AS INTEGER) as hour_utc,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN outcome IN ('win','take_profit') THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN outcome IN ('loss','stop_loss') THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(pnl), 0) as pnl
+                FROM trades
+                WHERE outcome IS NOT NULL
+                  AND timestamp >= datetime('now', '-{min(days, 365)} days')
+                  {mode_cond}
+                GROUP BY hour_utc
+                ORDER BY hour_utc"""
+            )
+            rows = await cursor.fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                total = d["wins"] + d["losses"]
+                d["win_rate"] = d["wins"] / total if total > 0 else 0
+                result.append(d)
+            return result
+        finally:
+            await db.close()
+
+    @router.get("/stats/slippage")
+    async def stats_slippage(limit: int = 100):
+        """Recent slippage p50/p95/p99."""
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT slippage FROM slippage_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return {"count": 0, "p50": 0, "p95": 0, "p99": 0}
+
+            slippages = sorted(r["slippage"] for r in rows)
+            n = len(slippages)
+
+            def percentile(data, pct):
+                idx = int(len(data) * pct / 100)
+                return data[min(idx, len(data) - 1)]
+
+            return {
+                "count": n,
+                "p50": round(percentile(slippages, 50), 6),
+                "p95": round(percentile(slippages, 95), 6),
+                "p99": round(percentile(slippages, 99), 6),
+                "mean": round(sum(slippages) / n, 6),
+                "max": round(slippages[-1], 6),
+            }
+        finally:
+            await db.close()
+
     return router
 
 

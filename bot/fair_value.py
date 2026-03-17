@@ -15,6 +15,7 @@ Model:
 
 import math
 import logging
+from collections import deque
 from dataclasses import dataclass
 
 from data.buffer import PriceBuffer
@@ -52,6 +53,49 @@ class EdgeResult:
     market_price: float     # What the market charges
     breakeven: float        # Price × (1 + fee) — need prob > this
     fair_value: FairValueEstimate | None
+
+
+class ConformalTracker:
+    """Track prediction residuals and compute conformal calibration metric (eq).
+
+    eq = 90th percentile of absolute residuals over a rolling window.
+    Higher eq means the model is less calibrated → tighten risk.
+    """
+
+    def __init__(self, max_size: int = 200):
+        self._residuals: deque[float] = deque(maxlen=max_size)
+
+    def update(self, y: float, phat: float):
+        """Record actual outcome (1=up, 0=down) vs predicted probability."""
+        self._residuals.append(abs(y - phat))
+
+    def conformal_low(self, phat: float) -> float:
+        """Conservative lower bound: phat - eq."""
+        return max(0.0, phat - self.eq)
+
+    @property
+    def eq(self) -> float:
+        """90th percentile of absolute residuals (calibration error)."""
+        if len(self._residuals) < 10:
+            return 0.0
+        sorted_res = sorted(self._residuals)
+        idx = int(len(sorted_res) * 0.9)
+        return sorted_res[min(idx, len(sorted_res) - 1)]
+
+    @property
+    def residuals_list(self) -> list[float]:
+        """Snapshot for persistence."""
+        return list(self._residuals)
+
+    def restore(self, residuals: list[float]):
+        """Restore from persisted state."""
+        self._residuals.clear()
+        for r in residuals:
+            self._residuals.append(r)
+
+
+# Module-level singleton
+conformal = ConformalTracker()
 
 
 def estimate_fair_value(buf: PriceBuffer) -> FairValueEstimate | None:

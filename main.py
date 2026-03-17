@@ -75,6 +75,7 @@ async def main():
     # Load RAG patterns and wire to engine
     await pattern_store.load()
     engine.pattern_store = pattern_store
+    engine.telegram = telegram
 
     # Wire up callbacks
     async def on_trade(data):

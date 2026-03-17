@@ -1,6 +1,7 @@
 """Position sizing — signal-proportional with safety caps + drawdown scaling."""
 
 from bot.config import get
+from bot.state import state
 
 
 def _drawdown_multiplier(daily_pnl: float, bankroll: float) -> float:
@@ -85,5 +86,55 @@ def kelly_size(
         "shares": round(shares, 4),
         "entry_price": entry_price,
         "drawdown_multiplier": round(drawdown_mult, 2),
+        "reason": "",
+    }
+
+
+async def fixed_size(
+    bankroll: float,
+    daily_pnl: float,
+    entry_price: float,
+) -> dict:
+    """Fixed sizing: $1 default, graduates to $2 after N +EV decisions.
+
+    Returns same dict shape as kelly_size for drop-in compatibility.
+    """
+    no_trade = {
+        "size_usd": 0,
+        "shares": 0,
+        "entry_price": entry_price,
+        "reason": "",
+    }
+
+    bankroll_floor = get("bankroll_floor_usd", 2.0)
+    if bankroll < bankroll_floor:
+        no_trade["reason"] = f"Bankroll ${bankroll:.2f} below floor ${bankroll_floor:.2f}"
+        return no_trade
+
+    daily_stop = get("daily_stop_loss_usd", 2.0)
+    if daily_pnl <= -daily_stop:
+        no_trade["reason"] = f"Daily stop loss hit (${daily_pnl:.2f})"
+        return no_trade
+
+    base_size = get("fixed_size_usd", 1.0)
+    max_size = get("max_fixed_size_usd", 2.0)
+    graduation = get("graduation_trades", 100)
+
+    # Check graduation count from state
+    grad_count = await state.get("graduation_count", 0)
+    size_usd = max_size if grad_count >= graduation else base_size
+
+    # Don't exceed bankroll
+    size_usd = min(size_usd, bankroll - bankroll_floor)
+    if size_usd < 1.0:
+        no_trade["reason"] = f"Size ${size_usd:.2f} below $1 minimum"
+        return no_trade
+
+    shares = size_usd / entry_price
+
+    return {
+        "size_usd": round(size_usd, 2),
+        "shares": round(shares, 4),
+        "entry_price": entry_price,
         "reason": "",
     }

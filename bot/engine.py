@@ -9,11 +9,17 @@ import numpy as np
 
 from bot.config import get
 from bot.state import state
-from bot.fair_value import estimate_fair_value, find_edge, TAKER_FEE
-from bot.risk import check_risk, record_outcome, decrement_cooldown, reset_daily
-from bot.sizing import kelly_size
+from bot.fair_value import estimate_fair_value, find_edge, TAKER_FEE, conformal
+from bot.risk import (
+    check_risk, record_outcome, decrement_cooldown, reset_daily,
+    check_regime_edge, check_kill_switch, check_endgame,
+    check_daily_dollar_limits, check_slippage_tightening,
+    record_stale_read, RiskCheck,
+)
+from bot.sizing import kelly_size, fixed_size
 from bot.executor import execute_trade, exit_position, resolve_trade, update_daily_stats, recover_pending_fills
 from bot.market_discovery import discover_market
+from bot.autotune import auto_tune, format_autotune_message
 from rag.reflection import maybe_reflect
 from data.binance_ws import BinanceWS
 from data.buffer import PriceBuffer
@@ -41,6 +47,7 @@ class TradingEngine:
         self.on_round_update = None  # async callback(round_data)
 
         self.pattern_store = None  # Set by main.py
+        self.telegram = None       # Set by main.py
 
         # Current market time remaining (used by _build_features for RAG)
         self._market_seconds_remaining = 150.0  # Default: midpoint of 5min
@@ -54,6 +61,11 @@ class TradingEngine:
 
         # Retry queue for failed auto-redeems
         self._pending_redeems: list[dict] = []
+
+        # v2: rolling vol windows for median calculation
+        self._vol_history: list[float] = []
+        # v2: previous round's vol for endgame comparison
+        self._prev_vol: float = 0.0
 
     async def _on_kline(self, kline):
         self.price_buffer.update(kline)
@@ -74,6 +86,12 @@ class TradingEngine:
             await state.set("initial_deposit", bankroll)
 
         logger.info("Engine starting with bankroll: $%.2f", bankroll)
+
+        # Restore conformal tracker residuals from persistent state
+        saved_residuals = await state.get("conformal_residuals", None)
+        if saved_residuals and isinstance(saved_residuals, list):
+            conformal.restore(saved_residuals)
+            logger.info("Restored conformal tracker: %d residuals, eq=%.4f", len(saved_residuals), conformal.eq)
 
         # Crash recovery: resolve any pending trades from previous run
         await self._recover_pending_trades(bankroll)
@@ -99,6 +117,8 @@ class TradingEngine:
         """Stop the engine gracefully."""
         self._running = False
         await state.set("enabled", False)
+        # Persist conformal residuals for next startup
+        await state.set("conformal_residuals", conformal.residuals_list)
         await self.binance_ws.stop()
         await self.polymarket_ws.stop()
         logger.info("Engine stopped")
@@ -249,6 +269,10 @@ class TradingEngine:
                 if self._round % 10 == 0 and not self._pending_redeems:
                     await self._sync_balance()
 
+                # Auto-tune every 720 rounds (~1 hora con 5s/round)
+                if self._round % 720 == 100:
+                    await self._run_auto_tune()
+
                 self._round += 1
                 await self._run_round()
 
@@ -296,25 +320,19 @@ class TradingEngine:
         return f"Riesgo: {reason}"
 
     async def _run_round(self):
-        """Execute one trading round."""
-        # 1. DISCOVER
+        """Execute one trading round (v2 strategy flow)."""
+        # 1. DISCOVER MARKET → tau
         market = await discover_market()
         if market is None:
             logger.debug("Round %d: no market found", self._round)
             await self._broadcast_round("wait", "Sin mercado activo en este momento")
-            # Don't decrement cooldown when no market exists
             return
 
         market_name = market.question or ""
+        tau = market.seconds_remaining
 
-        # Only trade inside the market's time window
         if not market.is_in_window:
             mins = market.seconds_until_start / 60
-            logger.debug(
-                "Round %d: market not in window yet (starts in %.0fs)",
-                self._round,
-                market.seconds_until_start,
-            )
             await self._broadcast_round(
                 "wait",
                 f"Mercado no abrió todavía (faltan {mins:.0f}min)",
@@ -322,45 +340,58 @@ class TradingEngine:
             )
             return
 
-        # Decrement cooldown only when a market is available (meaningful round)
         await decrement_cooldown()
+        self._market_seconds_remaining = tau
 
-        # Update time remaining for RAG feature vector
-        self._market_seconds_remaining = market.seconds_remaining
-
-        min_time = get("min_time_remaining_sec", 30)
-        if market.seconds_remaining < min_time:
-            logger.debug(
-                "Round %d: %.0fs remaining < %ds minimum",
-                self._round,
-                market.seconds_remaining,
-                min_time,
-            )
+        min_time = get("min_time_remaining_sec", 10)
+        if tau < min_time:
             await self._broadcast_round(
                 "skip",
-                f"Poco tiempo restante ({market.seconds_remaining:.0f}s < {min_time}s)",
+                f"Poco tiempo restante ({tau:.0f}s < {min_time}s)",
                 market_name=market_name,
             )
+            await self._log_decision(market_name, "skip_time", tau=tau)
             return
 
-        # Late-entry strategy: wait for trend to develop before entering
         max_time = get("max_time_remaining_sec", 0)
-        if max_time > 0 and market.seconds_remaining > max_time:
-            logger.info(
-                "Round %d: %.0fs remaining > %ds max (waiting for trend)",
-                self._round,
-                market.seconds_remaining,
-                max_time,
-            )
+        if max_time > 0 and tau > max_time:
             await self._broadcast_round(
                 "wait",
-                f"Esperando tendencia ({market.seconds_remaining:.0f}s > {max_time}s)",
+                f"Esperando tendencia ({tau:.0f}s > {max_time}s)",
                 market_name=market_name,
             )
             return
 
-        # Check data freshness
+        # 2. KILL SWITCH
+        kill = await check_kill_switch()
+        if not kill:
+            logger.warning("Round %d: KILL SWITCH — %s", self._round, kill.reason)
+            await self._broadcast_round("halt", kill.reason, market_name=market_name)
+            await self._log_decision(market_name, "kill_switch", tau=tau)
+            return
+
+        # 3. TRADING HOURS
+        active_hours = get("active_hours_utc", [])
+        if active_hours:
+            current_hour = datetime.now(timezone.utc).hour
+            if current_hour not in active_hours:
+                await self._broadcast_round(
+                    "hold", f"Fuera de horario activo (hora UTC {current_hour})",
+                    market_name=market_name,
+                )
+                return
+
+        # 4. DAILY DOLLAR LIMITS
+        daily_pnl = await state.get("daily_pnl", 0.0)
+        daily_check = check_daily_dollar_limits(daily_pnl)
+        if not daily_check:
+            await self._broadcast_round("hold", daily_check.reason, market_name=market_name)
+            await self._log_decision(market_name, "daily_limit", tau=tau)
+            return
+
+        # 5. DATA FRESHNESS
         if self.price_buffer.is_stale:
+            record_stale_read()
             logger.warning("Round %d: price data is stale, skipping", self._round)
             await self._broadcast_round(
                 "skip", "Datos de precio insuficientes",
@@ -368,26 +399,24 @@ class TradingEngine:
             )
             return
 
-        # Subscribe to orderbook for this market's Up token
+        # Subscribe to orderbook
         await self.polymarket_ws.subscribe(market.token_up_id)
-        await asyncio.sleep(1)  # Wait for orderbook snapshot
+        await asyncio.sleep(1)
 
-        # REST fallback if WS orderbook is empty
         ob = self.polymarket_ws.orderbook
         if not ob.bids and not ob.asks:
             await self.polymarket_ws.fetch_orderbook_rest(market.token_up_id)
 
-        # 2. FAIR VALUE SIGNAL
+        # 6. FAIR VALUE → phat, sigma
         fv = estimate_fair_value(self.price_buffer)
         if fv is None:
-            logger.debug("Round %d: fair value not ready", self._round)
             await self._broadcast_round(
                 "skip", "Fair value no listo (pocos datos)",
                 market_name=market_name,
             )
             return
 
-        # Vol regime filter: skip low vol (no signal) and very high vol (chaos)
+        # Vol regime filter
         min_vol = get("min_vol_5m", 0.0005)
         max_vol = get("max_vol_5m", 0.004)
         if fv.vol_5m < min_vol:
@@ -403,6 +432,13 @@ class TradingEngine:
             )
             return
 
+        # 7. DETECT MICROSPIKE
+        microspike, delta_dir = self._detect_microspike()
+
+        # 8. COMPUTE VOL MEDIAN
+        vol_median = self._vol_median(fv.vol_5m)
+
+        # Get market prices
         ob_up = self.polymarket_ws.orderbook
         price_up = ob_up.midpoint
         if price_up is None:
@@ -414,16 +450,13 @@ class TradingEngine:
             )
             return
 
-        # Fetch Down token orderbook independently (no WS mutation)
         ob_down = await fetch_orderbook_snapshot(market.token_down_id)
-        if ob_down.midpoint is not None:
-            price_down = ob_down.midpoint
-        else:
-            price_down = 1.0 - price_up  # fallback
+        price_down = ob_down.midpoint if ob_down.midpoint is not None else 1.0 - price_up
 
+        # 9. FIND EDGE (existing)
         edge_result = find_edge(fv, price_up, price_down)
 
-        # Cache for dashboard
+        # Cache for dashboard (extended with v2 info)
         self._last_signals = {
             "prob_up": round(fv.prob_up, 4),
             "prob_down": round(fv.prob_down, 4),
@@ -434,6 +467,10 @@ class TradingEngine:
             "edge": round(edge_result.edge, 4),
             "side": edge_result.side,
             "has_edge": edge_result.has_edge,
+            "tau": round(tau, 1),
+            "eq": round(conformal.eq, 4),
+            "microspike": microspike,
+            "vol_median": round(vol_median, 6) if vol_median else None,
         }
 
         if self.on_signal:
@@ -441,13 +478,14 @@ class TradingEngine:
 
         logger.info(
             "Round %d | FV P(up)=%.1f%% mkt=%.1f%% | P(dn)=%.1f%% mkt=%.1f%% | "
-            "vol=%.4f%% drift=%.4f%% | edge=%s %.1f%%",
+            "vol=%.4f%% drift=%.4f%% | edge=%s %.1f%% | tau=%.0f eq=%.3f",
             self._round,
             fv.prob_up * 100, price_up * 100,
             fv.prob_down * 100, price_down * 100,
             fv.vol_5m * 100, fv.drift_5m * 100,
             edge_result.side or "none",
             edge_result.edge * 100,
+            tau, conformal.eq,
         )
 
         # Record paper trade (always, for tracking)
@@ -459,11 +497,16 @@ class TradingEngine:
                 f"Sin edge ({edge_result.edge*100:.1f}%)",
                 market_name=market_name,
             )
+            await self._log_decision(
+                market_name, "no_edge", tau=tau,
+                sigma_pct=fv.vol_5m, p_hat=fv.prob_up, edge=edge_result.edge,
+                q_yes=price_up, spread=ob_up.spread,
+            )
             return
 
-        # Edge band filter: best WR in 6-12% bucket (71%), 12-20% still +EV (57%)
-        min_edge = get("min_edge", 0.03)
-        max_edge = get("max_edge", 0.12)
+        # Edge band filter
+        min_edge = get("min_edge", 0.06)
+        max_edge = get("max_edge", 0.20)
         if edge_result.edge < min_edge:
             await self._broadcast_round(
                 "skip",
@@ -481,7 +524,58 @@ class TradingEngine:
 
         side = edge_result.side
 
-        # 3. RISK CHECK
+        # 10. CHECK REGIME EDGE (v2)
+        if side == "up":
+            trade_spread = ob_up.spread
+        else:
+            trade_spread = ob_down.spread
+
+        regime_check = check_regime_edge(
+            tau=tau,
+            edge=edge_result.edge,
+            spread=trade_spread,
+            vol_5m=fv.vol_5m,
+            vol_median=vol_median,
+            microspike=microspike,
+            delta_dir=delta_dir,
+            side=side,
+        )
+        if not regime_check:
+            await self._broadcast_round("skip", regime_check.reason, market_name=market_name)
+            await self._log_decision(
+                market_name, "regime_block", tau=tau,
+                p_hat=fv.prob_up, edge=edge_result.edge,
+            )
+            return
+
+        # 11. CHECK ENDGAME (v2)
+        endgame_check = check_endgame(
+            tau=tau,
+            spread=trade_spread,
+            vol_5m=fv.vol_5m,
+            vol_prev=self._prev_vol,
+            edge=edge_result.edge,
+        )
+        if not endgame_check:
+            await self._broadcast_round("skip", endgame_check.reason, market_name=market_name)
+            await self._log_decision(
+                market_name, "endgame_block", tau=tau,
+                edge=edge_result.edge, spread=trade_spread,
+            )
+            return
+
+        # 12. SLIPPAGE TIGHTENING (v2)
+        edge_bonus = check_slippage_tightening()
+        effective_min_edge = min_edge + edge_bonus
+        if edge_bonus > 0 and edge_result.edge < effective_min_edge:
+            await self._broadcast_round(
+                "skip",
+                f"Slippage tightening: edge {edge_result.edge*100:.1f}% < {effective_min_edge*100:.1f}%",
+                market_name=market_name,
+            )
+            return
+
+        # 13. EXISTING RISK GATES
         bankroll = await state.get("bankroll", 50.0)
         risk = await check_risk(edge_result.edge, bankroll)
         if not risk:
@@ -496,21 +590,20 @@ class TradingEngine:
             )
             return
 
-        # 4. SIZE — get actual entry price from orderbook
+        # 14. SIZE — get actual entry price from orderbook
         if side == "up":
             token_id = market.token_up_id
             entry_price = ob_up.best_ask or price_up
-            trade_spread = ob_up.spread
+            best_price = ob_up.best_ask or price_up
         else:
             token_id = market.token_down_id
-            trade_spread = ob_down.spread
             if ob_down.best_ask is not None and 0.05 < ob_down.best_ask < 0.95:
                 entry_price = ob_down.best_ask
+                best_price = ob_down.best_ask
             elif ob_up.best_bid is not None and 0.05 < ob_up.best_bid < 0.95:
-                # Derive from Up bid (no re-subscribe needed)
                 entry_price = 1.0 - ob_up.best_bid
+                best_price = entry_price
             else:
-                logger.warning("Round %d: No Down pricing available, skipping", self._round)
                 await self._broadcast_round(
                     "skip", "Sin precio para Down token",
                     market_name=market_name,
@@ -518,13 +611,9 @@ class TradingEngine:
                 return
 
         # Entry price filter
-        min_ep = get("min_entry_price", 0.25)
-        max_ep = get("max_entry_price", 0.75)
+        min_ep = get("min_entry_price", 0.35)
+        max_ep = get("max_entry_price", 0.65)
         if entry_price < min_ep or entry_price > max_ep:
-            logger.info(
-                "Round %d: FV %s → SKIP: price %.2f outside [%.2f, %.2f]",
-                self._round, side.upper(), entry_price, min_ep, max_ep,
-            )
             await self._broadcast_round(
                 "skip",
                 f"Precio {entry_price:.2f} fuera de rango [{min_ep}, {max_ep}]",
@@ -542,12 +631,11 @@ class TradingEngine:
             )
             return
 
-        daily_pnl = await state.get("daily_pnl", 0.0)
-        sizing = kelly_size(edge_result.edge, entry_price, bankroll, daily_pnl=daily_pnl)
+        # Fixed sizing (v2) instead of kelly
+        sizing = await fixed_size(bankroll, daily_pnl, entry_price)
         if sizing["size_usd"] <= 0:
-            reason_en = sizing.get("reason", "no edge per Kelly")
-            reason_es = "Sin edge según Kelly" if "spread" not in reason_en.lower() else "Spread muy amplio"
-            await self._broadcast_round("skip", reason_es, market_name=market_name)
+            reason_en = sizing.get("reason", "sizing blocked")
+            await self._broadcast_round("skip", reason_en, market_name=market_name)
             return
 
         # Max 1 trade per market
@@ -568,13 +656,34 @@ class TradingEngine:
             )
             return
 
-        # 5. EXECUTE
+        # Conformal lower bound check
+        phat = fv.prob_up if side == "up" else fv.prob_down
+        p_hat_low = conformal.conformal_low(phat)
+        p_req = entry_price * (1 + TAKER_FEE)
+        if p_hat_low < p_req:
+            await self._broadcast_round(
+                "skip",
+                f"Conformal: p_hat_low={p_hat_low:.3f} < p_req={p_req:.3f}",
+                market_name=market_name,
+            )
+            await self._log_decision(
+                market_name, "conformal_block", tau=tau,
+                p_hat=phat, p_hat_low=p_hat_low, p_req=p_req,
+                edge=edge_result.edge,
+            )
+            return
+
+        # 15. EXECUTE IOC
         signal_details = {
-            "model": "fair_value",
+            "model": "fair_value_v2",
             "prob_estimated": edge_result.prob,
             "edge": edge_result.edge,
             "vol_5m": fv.vol_5m,
             "drift_5m": fv.drift_5m,
+            "tau": tau,
+            "eq": conformal.eq,
+            "microspike": microspike,
+            "p_hat_low": p_hat_low,
         }
         result = await execute_trade(
             condition_id=market.condition_id,
@@ -587,19 +696,26 @@ class TradingEngine:
             signal_details=signal_details,
             spread=trade_spread,
             btc_price=self.price_buffer.current_price,
+            best_price=best_price,
+            tau_at_entry=tau,
+            phat_at_entry=phat,
         )
 
         if not result.success:
             logger.warning("Round %d: execution failed — %s", self._round, result.error)
+            await self._log_decision(
+                market_name, "exec_fail", tau=tau,
+                edge=edge_result.edge, p_hat=phat,
+            )
             return
 
         await state.set("last_trade_timestamp", time.time())
 
         side_label = side.upper()
         logger.info(
-            "FV TRADE: %s @ %.2f¢ (edge=%.1f%%, prob=%.1f%%), size $%.2f",
+            "FV TRADE v2: %s @ %.2f¢ (edge=%.1f%%, prob=%.1f%%), size $%.2f, tau=%.0fs",
             side_label, entry_price * 100, edge_result.edge * 100,
-            edge_result.prob * 100, sizing["size_usd"],
+            edge_result.prob * 100, sizing["size_usd"], tau,
         )
         await self._broadcast_round(
             "trade",
@@ -616,11 +732,25 @@ class TradingEngine:
             "entry_price": entry_price,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "market": market.question,
+            "tau": tau,
         }
         if self.on_trade:
             await self.on_trade(trade_data)
 
-        # 6. RESOLVE in background
+        # 16. LOG DECISION
+        await self._log_decision(
+            market_name, "trade", tau=tau,
+            delta_pct=fv.drift_5m, sigma_pct=fv.vol_5m,
+            q_yes=price_up, spread=trade_spread,
+            p0=entry_price, p_ob=best_price,
+            p_hat=phat, p_hat_low=p_hat_low,
+            p_req=p_req, edge=edge_result.edge,
+        )
+
+        # Store prev vol for endgame comparison
+        self._prev_vol = fv.vol_5m
+
+        # RESOLVE in background
         asyncio.create_task(self._monitor_and_resolve(
             market=market,
             side=side,
@@ -629,10 +759,11 @@ class TradingEngine:
             bankroll=bankroll,
             edge=edge_result.edge,
             market_name=market_name,
+            phat=phat,
         ))
 
     async def _monitor_and_resolve(self, market, side, token_id, result,
-                                    bankroll, edge, market_name):
+                                    bankroll, edge, market_name, phat=None):
         """Background task: monitor position for SL/TP, then resolve."""
         try:
             wait_seconds = min(
@@ -786,6 +917,32 @@ class TradingEngine:
             await record_outcome(won_for_stats, pnl, new_bankroll)
             await update_daily_stats(pnl, won_for_stats, new_bankroll)
 
+            # Update conformal tracker with actual outcome
+            if phat is not None:
+                y = 1.0 if won_for_stats else 0.0
+                conformal.update(y, phat)
+                # Save residual to trade row
+                residual = abs(y - phat)
+                try:
+                    db = await get_db()
+                    try:
+                        await db.execute(
+                            "UPDATE trades SET residual = ? WHERE id = ?",
+                            (residual, result.trade_id),
+                        )
+                        await db.commit()
+                    finally:
+                        await db.close()
+                except Exception:
+                    pass
+                # Persist conformal state periodically
+                await state.set("conformal_residuals", conformal.residuals_list)
+
+            # Track graduation (positive EV decisions)
+            if won_for_stats:
+                grad = await state.get("graduation_count", 0)
+                await state.set("graduation_count", grad + 1)
+
             # Store RAG pattern
             if self.pattern_store is not None:
                 try:
@@ -829,6 +986,67 @@ class TradingEngine:
             logger.error("Background resolution error for trade %d: %s", result.trade_id, e, exc_info=True)
             await state.set("has_open_position", False)
             await state.set("current_exposure", 0.0)
+
+    def _detect_microspike(self) -> tuple[bool, str]:
+        """Detect if last 1-min return exceeds microspike threshold.
+
+        Returns (is_spike, direction) where direction is 'up' or 'down'.
+        """
+        threshold = get("microspike_ret_threshold", 0.002)
+        ret_1m = self.price_buffer.ret(1, use_live=True)
+        if ret_1m is None:
+            return False, "up"
+        if abs(ret_1m) > threshold:
+            direction = "up" if ret_1m > 0 else "down"
+            logger.info("Microspike detected: ret_1m=%.4f%% dir=%s", ret_1m * 100, direction)
+            return True, direction
+        return False, "up" if (ret_1m or 0) >= 0 else "down"
+
+    def _vol_median(self, current_vol: float) -> float:
+        """Rolling median of last 10 volatility observations."""
+        self._vol_history.append(current_vol)
+        if len(self._vol_history) > 10:
+            self._vol_history = self._vol_history[-10:]
+        if not self._vol_history:
+            return current_vol
+        sorted_vols = sorted(self._vol_history)
+        mid = len(sorted_vols) // 2
+        if len(sorted_vols) % 2 == 0:
+            return (sorted_vols[mid - 1] + sorted_vols[mid]) / 2
+        return sorted_vols[mid]
+
+    async def _log_decision(self, market: str, decision: str, **kwargs):
+        """Insert a row into the decisions telemetry table."""
+        try:
+            db = await get_db()
+            try:
+                await db.execute(
+                    """INSERT INTO decisions
+                       (ts, market, decision, tau, delta_pct, sigma_pct,
+                        q_yes, spread, p0, p_ob, p_hat, p_hat_low, p_req, edge)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        market,
+                        decision,
+                        kwargs.get("tau"),
+                        kwargs.get("delta_pct"),
+                        kwargs.get("sigma_pct"),
+                        kwargs.get("q_yes"),
+                        kwargs.get("spread"),
+                        kwargs.get("p0"),
+                        kwargs.get("p_ob"),
+                        kwargs.get("p_hat"),
+                        kwargs.get("p_hat_low"),
+                        kwargs.get("p_req"),
+                        kwargs.get("edge"),
+                    ),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        except Exception as e:
+            logger.debug("Decision log failed: %s", e)
 
     def _build_features(self) -> np.ndarray | None:
         """Build 8-float feature vector from current price buffer state.
@@ -1031,6 +1249,25 @@ class TradingEngine:
         # Sync balance after successful redeems to capture the returned USDC.e
         if redeemed_any:
             await self._sync_balance()
+
+    async def _run_auto_tune(self):
+        """Run auto-tuning analysis and apply parameter adjustments."""
+        try:
+            changes = await auto_tune()
+            if changes:
+                # Broadcast to dashboard
+                if self.on_round_update:
+                    await self.on_round_update({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "decision": "autotune",
+                        "reason": f"{len(changes)} parameter(s) adjusted",
+                    })
+                # Telegram notification
+                msg = format_autotune_message(changes)
+                if msg and self.telegram:
+                    await self.telegram.send(msg)
+        except Exception as e:
+            logger.error("Auto-tune error: %s", e, exc_info=True)
 
     async def _check_daily_reset(self):
         """Reset daily counters at midnight UTC."""

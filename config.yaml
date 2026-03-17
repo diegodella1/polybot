@@ -8,14 +8,14 @@ max_edge: 0.20
 min_vol_5m: 0.0005
 max_vol_5m: 0.004
 max_spread_cents: 5
-min_time_remaining_sec: 30
+min_time_remaining_sec: 10
 max_consecutive_losses: 5
 cooldown_rounds: 1
 min_entry_price: 0.35
 max_entry_price: 0.65
 stop_loss_pct: 0.15
 take_profit_pct: 1
-trade_cooldown_seconds: 30
+trade_cooldown_seconds: 5
 post_loss_cooldown_seconds: 0
 min_win_rate: 0
 circuit_breaker_window: 30
@@ -29,3 +29,57 @@ telegram_enabled: true
 bot_enabled: true
 binance_symbol: btcusdt
 max_time_remaining_sec: 0
+
+# --- Strategy v2 parameters ---
+
+# Edge por regimen temporal (tau = seconds remaining)
+edge_regime:
+  tau_120_60: 0.18
+  tau_60_30: 0.14
+  tau_30_10: 0.12
+  tau_10_0: 0.15
+  late_max_spread: 0.03
+  endgame_max_spread: 0.02
+
+# Sizing fijo
+fixed_size_usd: 1.0
+max_fixed_size_usd: 2.0
+graduation_trades: 100
+
+# Limites diarios en USD
+daily_stop_loss_usd: 2.0
+daily_profit_target_usd: 2.0
+
+# Staleness estricta
+max_data_stale_sec: 1.0
+max_clock_skew_ms: 250
+
+# Kill switch
+kill_consecutive_losses: 3
+kill_consecutive_window_min: 10
+kill_resume_stable_min: 10
+kill_calibration_eq_max: 0.14
+kill_resume_eq_max: 0.10
+
+# Endgame (ultimos 20s)
+endgame_seconds: 20
+endgame_min_edge: 0.18
+endgame_max_spread: 0.02
+
+# Microspike
+microspike_ret_threshold: 0.002
+
+# Slippage
+slippage_tighten_p95: 0.02
+slippage_tighten_edge_bonus: 0.02
+slippage_tighten_duration_min: 30
+
+# Horas activas UTC (vacio = 24/7)
+active_hours_utc: []
+
+# Auto-tuning
+autotune_enabled: true
+autotune_lookback_hours: 24
+autotune_min_trades: 20
+autotune_target_wr: 0.50
+autotune_wr_margin: 0.05
