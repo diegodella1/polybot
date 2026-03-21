@@ -5,7 +5,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "polybot.db")
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
 # Current schema version — bump when adding new migrations
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -70,6 +70,9 @@ async def _run_migrations(db: aiosqlite.Connection):
     if current_version < 2:
         await _migrate_v2(db)
 
+    if current_version < 3:
+        await _migrate_v3(db)
+
     if current_version < SCHEMA_VERSION:
         await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await db.commit()
@@ -133,4 +136,17 @@ async def _migrate_v2(db: aiosqlite.Connection):
         "CREATE INDEX IF NOT EXISTS idx_slippage_trade ON slippage_events(trade_id)"
     )
 
+    await db.commit()
+
+
+async def _migrate_v3(db: aiosqlite.Connection):
+    """Schema v3: market_duration column for multi-timeframe support."""
+    for col_sql in [
+        "ALTER TABLE trades ADD COLUMN market_duration INTEGER DEFAULT 300",
+        "ALTER TABLE paper_trades ADD COLUMN market_duration INTEGER DEFAULT 300",
+    ]:
+        try:
+            await db.execute(col_sql)
+        except Exception:
+            pass  # Column already exists
     await db.commit()

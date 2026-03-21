@@ -389,6 +389,17 @@ async function stopBot() {
     }
 }
 
+async function restartBot() {
+    if (!confirm('Restart the bot process? It will reload all code.')) return;
+    try {
+        await authFetch(`${API}/api/bot/restart`, { method: 'POST' });
+        showToast('Restarting... page will reload in 5s', 'success');
+        setTimeout(() => location.reload(), 5000);
+    } catch (e) {
+        showToast('Failed to restart', 'error');
+    }
+}
+
 async function logout() {
     await fetch(`${API}/api/auth/logout`, { method: 'POST' });
     location.href = '/login';
@@ -497,7 +508,7 @@ async function loadWalletBalances() {
         const d = await res.json();
         const fmt = (v) => v != null ? `$${v.toFixed(2)}` : '\u2014';
 
-        document.getElementById('walletExchange').textContent = fmt(d.exchange_usdc);
+        document.getElementById('walletUsdcNative').textContent = fmt(d.eoa_usdc_native);
         document.getElementById('walletEoa').textContent = fmt(d.eoa_usdc);
 
         const unEl = document.getElementById('walletUnredeemed');
@@ -521,6 +532,58 @@ async function loadWalletBalances() {
             maticEl.style.color = d.matic < 0.1 ? 'var(--red)' : 'var(--text-dim)';
         }
     } catch (e) { console.error('Wallet failed:', e); }
+}
+
+async function paperFund(mode) {
+    const amount = parseFloat(document.getElementById('paperAmount').value);
+    if (!amount || amount <= 0) { showToast('Enter a valid amount', 'error'); return; }
+    const label = mode === 'set' ? `Set bankroll to $${amount}?` : `Add $${amount} to bankroll?`;
+    if (!confirm(label)) return;
+    const statusEl = document.getElementById('paperStatus');
+    statusEl.textContent = 'Processing...';
+    try {
+        const res = await authFetch(`${API}/api/paper/fund`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount, mode }),
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+            showToast(`Bankroll: $${d.previous_bankroll.toFixed(2)} → $${d.new_bankroll.toFixed(2)}`, 'success');
+            statusEl.textContent = `$${d.previous_bankroll.toFixed(2)} → $${d.new_bankroll.toFixed(2)}`;
+        } else {
+            showToast(d.detail || 'Failed', 'error');
+            statusEl.textContent = d.detail || 'Error';
+        }
+    } catch (e) {
+        showToast(e.message, 'error');
+        statusEl.textContent = e.message;
+    }
+}
+
+async function paperReset() {
+    const amount = parseFloat(document.getElementById('paperAmount').value) || 50;
+    if (!confirm(`Reset ALL paper trades and set bankroll to $${amount}? This cannot be undone.`)) return;
+    const statusEl = document.getElementById('paperStatus');
+    statusEl.textContent = 'Resetting...';
+    try {
+        const res = await authFetch(`${API}/api/paper/reset`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bankroll: amount }),
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+            showToast(`Reset: ${d.trades_deleted} trades deleted, bankroll=$${d.bankroll.toFixed(2)}`, 'success');
+            statusEl.textContent = `Deleted ${d.trades_deleted} trades. Bankroll: $${d.bankroll.toFixed(2)}`;
+        } else {
+            showToast(d.detail || 'Failed', 'error');
+            statusEl.textContent = d.detail || 'Error';
+        }
+    } catch (e) {
+        showToast(e.message, 'error');
+        statusEl.textContent = e.message;
+    }
 }
 
 async function redeemAll() {

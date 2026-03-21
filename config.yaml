@@ -3,17 +3,17 @@ base_trade_pct: 0.07
 min_trade_usd: 1
 max_exposure_usd: 3.5
 daily_loss_limit_pct: 0.5
-min_edge: 0.06
-max_edge: 0.20
-min_vol_5m: 0.0005
+min_edge: 0.12
+max_edge: 0.3
+min_vol_5m: 0.002
 max_vol_5m: 0.004
 max_spread_cents: 5
 min_time_remaining_sec: 10
 max_consecutive_losses: 5
 cooldown_rounds: 1
-min_entry_price: 0.35
-max_entry_price: 0.65
-stop_loss_pct: 0.15
+min_entry_price: 0.42
+max_entry_price: 0.58
+stop_loss_pct: 0.08
 take_profit_pct: 1
 trade_cooldown_seconds: 5
 post_loss_cooldown_seconds: 0
@@ -22,64 +22,45 @@ circuit_breaker_window: 30
 circuit_breaker_hours: 2
 min_drawdown_multiplier: 0.25
 bankroll_floor_usd: 2
-dry_run: false
-use_tp_sl: false
+dry_run: true
+use_tp_sl: true
 rag_enabled: true
 telegram_enabled: true
 bot_enabled: true
 binance_symbol: btcusdt
 max_time_remaining_sec: 0
-
-# --- Strategy v2 parameters ---
-
-# Edge por regimen temporal (tau = seconds remaining)
 edge_regime:
-  tau_120_60: 0.18
-  tau_60_30: 0.14
-  tau_30_10: 0.12
+  tau_120_60: 0.06
+  tau_60_30: 0.06
+  tau_30_10: 0.06
   tau_10_0: 0.15
   late_max_spread: 0.03
   endgame_max_spread: 0.02
-
-# Sizing fijo
-fixed_size_usd: 1.0
-max_fixed_size_usd: 2.0
+fixed_size_usd: 1
+max_fixed_size_usd: 2
 graduation_trades: 100
-
-# Limites diarios en USD
-daily_stop_loss_usd: 2.0
-daily_profit_target_usd: 2.0
-
-# Staleness estricta
-max_data_stale_sec: 1.0
+daily_stop_loss_usd: 25
+max_data_stale_sec: 1
 max_clock_skew_ms: 250
-
-# Kill switch
+kill_switch_enabled: false
 kill_consecutive_losses: 3
 kill_consecutive_window_min: 10
 kill_resume_stable_min: 10
 kill_calibration_eq_max: 0.14
-kill_resume_eq_max: 0.10
-
-# Endgame (ultimos 20s)
+kill_resume_eq_max: 0.1
 endgame_seconds: 20
-endgame_min_edge: 0.18
+endgame_min_edge: 0.06
 endgame_max_spread: 0.02
-
-# Microspike
 microspike_ret_threshold: 0.002
-
-# Slippage
 slippage_tighten_p95: 0.02
 slippage_tighten_edge_bonus: 0.02
 slippage_tighten_duration_min: 30
-
-# Horas activas UTC (vacio = 24/7)
-active_hours_utc: []
-
-# Auto-tuning
-autotune_enabled: true
+active_hours_utc: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+autotune_enabled: false
 autotune_lookback_hours: 24
 autotune_min_trades: 20
-autotune_target_wr: 0.50
+autotune_target_wr: 0.5
 autotune_wr_margin: 0.05
+market_types:
+- 5m
+- 15m

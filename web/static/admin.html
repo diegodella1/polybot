@@ -4,13 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polybot Mission Control</title>
-    <link rel="stylesheet" href="/static/style.css?v=18">
+    <link rel="stylesheet" href="/static/style.css?v=23">
 </head>
 <body>
     <header>
         <div class="header-left">
             <h1>POLYBOT</h1>
-            <span style="font-family:var(--font-sans);font-size:10px;color:var(--accent);letter-spacing:1.5px;text-transform:uppercase;font-weight:700">Mission Control</span>
+            <span style="font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:1.5px;text-transform:uppercase;font-weight:700">Mission Control</span>
         </div>
         <div class="header-right">
             <a href="/" class="header-link">Dashboard</a>
@@ -52,6 +52,7 @@
         <div style="display:flex;gap:12px;align-items:center;margin:12px 0;flex-wrap:wrap">
             <button class="btn btn-start" id="btnStart" onclick="startBot()">&#x25b6; START</button>
             <button class="btn btn-stop" id="btnStop" onclick="stopBot()">&#x25a0; STOP</button>
+            <button class="btn btn-secondary" onclick="restartBot()">&#x21bb; RESTART</button>
             <div id="mcModeBadge" style="padding:5px 14px;border-radius:20px;font-family:var(--font-sans);font-size:11px;font-weight:700;letter-spacing:0.5px;background:var(--surface-3);color:var(--text-dim)">---</div>
             <div class="btc-ticker" id="mcBtcTicker" style="margin-left:auto">
                 <span>BTC</span>
@@ -343,6 +344,25 @@
             </div>
         </div>
 
+        <!-- ===== PAPER TRADING ===== -->
+        <div class="admin-section">
+            <div class="admin-section-header">
+                <span class="icon">&#9881;</span> Paper Trading
+            </div>
+            <div class="admin-section-body">
+                <div class="form-group">
+                    <span class="form-label">Amount (USD)</span>
+                    <input class="form-input" type="number" id="paperAmount" step="1" min="1" value="50" style="width:140px">
+                </div>
+                <div class="btn-group" style="margin-top:12px">
+                    <button class="btn btn-save" onclick="paperFund('set')">SET BANKROLL</button>
+                    <button class="btn btn-blue" onclick="paperFund('add')">ADD FUNDS</button>
+                    <button class="btn btn-stop" onclick="paperReset()">RESET ALL</button>
+                </div>
+                <div id="paperStatus" style="font-family:var(--font-sans);font-size:12px;color:var(--text-dim);margin-top:8px"></div>
+            </div>
+        </div>
+
         <!-- ===== WALLET ===== -->
         <div class="admin-section">
             <div class="admin-section-header">
@@ -351,8 +371,8 @@
             <div class="admin-section-body">
                 <div class="grid grid-4" style="margin:0">
                     <div class="card stat-card glow-blue" style="text-align:center">
-                        <div class="card-header">Exchange USDC</div>
-                        <div class="card-value" id="walletExchange" style="font-size:18px">&mdash;</div>
+                        <div class="card-header">USDC Native</div>
+                        <div class="card-value" id="walletUsdcNative" style="font-size:18px">&mdash;</div>
                     </div>
                     <div class="card stat-card glow-green" style="text-align:center">
                         <div class="card-header">EOA USDC.e</div>
@@ -471,12 +491,12 @@
         </div>
     </div>
 
-    <div style="margin:32px auto 16px;max-width:680px;padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.02);font-family:var(--font-sans);font-size:11px;color:var(--text-dim);line-height:1.5;text-align:center">
-        <strong style="color:var(--yellow)">EXPERIMENTAL SOFTWARE</strong> &mdash;
+    <div style="margin:32px auto 16px;max-width:680px;padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);font-family:var(--font-sans);font-size:11px;color:var(--text-dim);line-height:1.5;text-align:center">
+        <strong style="color:var(--text-secondary)">EXPERIMENTAL SOFTWARE</strong> &mdash;
         Not Financial Advice. DYOR. Use at your own risk.
     </div>
 
     <div class="toast-container" id="toastContainer"></div>
-    <script src="/static/admin.js?v=17"></script>
+    <script src="/static/admin.js?v=18"></script>
 </body>
 </html>

@@ -66,8 +66,17 @@ class ConformalTracker:
         self._residuals: deque[float] = deque(maxlen=max_size)
 
     def update(self, y: float, phat: float):
-        """Record actual outcome (1=up, 0=down) vs predicted probability."""
-        self._residuals.append(abs(y - phat))
+        """Record actual outcome (1=up, 0=down) vs predicted probability.
+
+        Loss residuals are weighted 2x so eq rises faster when the model
+        fails on losing trades, enabling quicker reaction to degradation.
+        """
+        residual = abs(y - phat)
+        self._residuals.append(residual)
+        # Asymmetric weighting: losses (y=0 when we predicted high, or y=1
+        # when we predicted low) get double-counted so eq tightens faster
+        if (y == 0.0 and phat > 0.5) or (y == 1.0 and phat < 0.5):
+            self._residuals.append(residual)
 
     def conformal_low(self, phat: float) -> float:
         """Conservative lower bound: phat - eq."""
@@ -98,10 +107,11 @@ class ConformalTracker:
 conformal = ConformalTracker()
 
 
-def estimate_fair_value(buf: PriceBuffer) -> FairValueEstimate | None:
-    """Estimate P(up) for next 5 minutes from realized volatility.
+def estimate_fair_value(buf: PriceBuffer, duration_min: float = 5) -> FairValueEstimate | None:
+    """Estimate P(up) from realized volatility, scaled to market duration.
 
     Uses overlapping 5-candle returns from the 1-min candle buffer.
+    For durations > 5 min, vol scales by √(T/5), drift by T/5.
     """
     candles = list(buf._candles)
     n = len(candles)
@@ -140,13 +150,18 @@ def estimate_fair_value(buf: PriceBuffer) -> FairValueEstimate | None:
     ret_1m = buf.ret(1, use_live=True)
     if ret_1m is not None:
         # Scale 1-min return to 5-min equivalent and blend
-        # Give live momentum 30% weight
+        # Give live momentum 15% weight (30% was too noisy)
         live_drift = ret_1m * math.sqrt(5)  # Scale by √5
-        ema_drift = 0.7 * ema_drift + 0.3 * live_drift
+        ema_drift = 0.85 * ema_drift + 0.15 * live_drift
+
+    # Scale vol and drift to market duration (σ_T = σ_5m × √(T/5), μ_T = μ_5m × T/5)
+    scale = duration_min / 5.0
+    vol = vol_5m * math.sqrt(scale)
+    drift = ema_drift * scale
 
     # P(up) = Φ(μ / σ) — probability that a normal(μ, σ) draw is > 0
-    if vol_5m > 0:
-        z_score = ema_drift / vol_5m
+    if vol > 0:
+        z_score = drift / vol
         prob_up = _norm_cdf(z_score)
     else:
         prob_up = 0.5
@@ -157,8 +172,8 @@ def estimate_fair_value(buf: PriceBuffer) -> FairValueEstimate | None:
     return FairValueEstimate(
         prob_up=prob_up,
         prob_down=1.0 - prob_up,
-        vol_5m=vol_5m,
-        drift_5m=ema_drift,
+        vol_5m=vol_5m,       # Store base 5m vol for compatibility
+        drift_5m=ema_drift,  # Store base 5m drift for compatibility
         n_windows=len(recent),
     )
 
@@ -189,6 +204,11 @@ def find_edge(
 
     edge_up = fv.prob_up - breakeven_up
     edge_down = fv.prob_down - breakeven_down
+
+    # Asymmetric penalty: DOWN signals are noisier (observed bias),
+    # require 3% more edge to compensate
+    DOWN_EDGE_PENALTY = 0.08
+    edge_down -= DOWN_EDGE_PENALTY
 
     # Pick the better side (if any has positive edge)
     if edge_up > 0 and edge_up >= edge_down:

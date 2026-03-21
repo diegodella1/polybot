@@ -24,7 +24,6 @@ USDC_E = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174") 
 USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")  # USDC (native)
 USDT = Web3.to_checksum_address("0xc2132D05D31c914a87C6611C10748AEb04B58e8F")  # USDT (PoS)
 CTF_ADDRESS = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")  # ConditionalTokens
-PROXY_WALLET = Web3.to_checksum_address(os.environ.get("POLYMARKET_PROXY_ADDRESS", "0x0000000000000000000000000000000000000000"))
 UNISWAP_V3_ROUTER = Web3.to_checksum_address("0xE592427A0AEce92De3Edee1F18E0157C05861564")
 
 # Minimal ABIs
@@ -193,14 +192,6 @@ def get_eoa_usdc_balance() -> float:
     w3, account = _get_account()
     usdc = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
     raw = usdc.functions.balanceOf(account.address).call()
-    return raw / 1e6
-
-
-def get_exchange_usdc_balance() -> float:
-    """Get USDC.e balance in Polymarket proxy wallet (available to trade)."""
-    w3 = _get_w3()
-    usdc = w3.eth.contract(address=USDC_E, abi=ERC20_ABI)
-    raw = usdc.functions.balanceOf(PROXY_WALLET).call()
     return raw / 1e6
 
 

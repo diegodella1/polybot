@@ -14,7 +14,7 @@ from bot.risk import (
     check_risk, record_outcome, decrement_cooldown, reset_daily,
     check_regime_edge, check_kill_switch, check_endgame,
     check_daily_dollar_limits, check_slippage_tightening,
-    record_stale_read, RiskCheck,
+    dynamic_min_edge, record_stale_read, RiskCheck,
 )
 from bot.sizing import kelly_size, fixed_size
 from bot.executor import execute_trade, exit_position, resolve_trade, update_daily_stats, recover_pending_fills
@@ -51,6 +51,7 @@ class TradingEngine:
 
         # Current market time remaining (used by _build_features for RAG)
         self._market_seconds_remaining = 150.0  # Default: midpoint of 5min
+        self._market_duration = 300  # Duration of current market in seconds
 
         # Cache last round's signals for consistent dashboard display
         self._last_signals = None
@@ -255,10 +256,6 @@ class TradingEngine:
                 if self._round % 5 == 0 and self._pending_redeems:
                     await self._process_pending_redeems()
 
-                # Resolve paper trades every 12 rounds (~1 min)
-                if self._round % 12 == 3:
-                    await self._resolve_paper_trades()
-
                 # Resolve any pending trades every 12 rounds (~1 min)
                 if self._round % 12 == 6:
                     bankroll = await state.get("bankroll", 0.0)
@@ -330,9 +327,7 @@ class TradingEngine:
 
         market_name = market.question or ""
         tau = market.seconds_remaining
-
         if not market.is_in_window:
-            mins = market.seconds_until_start / 60
             await self._broadcast_round(
                 "wait",
                 f"Mercado no abrió todavía (faltan {mins:.0f}min)",
@@ -342,6 +337,7 @@ class TradingEngine:
 
         await decrement_cooldown()
         self._market_seconds_remaining = tau
+        self._market_duration = market.duration_seconds
 
         min_time = get("min_time_remaining_sec", 10)
         if tau < min_time:
@@ -362,13 +358,7 @@ class TradingEngine:
             )
             return
 
-        # 2. KILL SWITCH
-        kill = await check_kill_switch()
-        if not kill:
-            logger.warning("Round %d: KILL SWITCH — %s", self._round, kill.reason)
-            await self._broadcast_round("halt", kill.reason, market_name=market_name)
-            await self._log_decision(market_name, "kill_switch", tau=tau)
-            return
+        # 2. (kill switch moved to after signal calc — see step 9b)
 
         # 3. TRADING HOURS
         active_hours = get("active_hours_utc", [])
@@ -383,8 +373,9 @@ class TradingEngine:
 
         # 4. DAILY DOLLAR LIMITS
         daily_pnl = await state.get("daily_pnl", 0.0)
-        daily_check = check_daily_dollar_limits(daily_pnl)
+        daily_check = await check_daily_dollar_limits(daily_pnl)
         if not daily_check:
+            logger.info("Round %d: %s", self._round, daily_check.reason)
             await self._broadcast_round("hold", daily_check.reason, market_name=market_name)
             await self._log_decision(market_name, "daily_limit", tau=tau)
             return
@@ -408,7 +399,7 @@ class TradingEngine:
             await self.polymarket_ws.fetch_orderbook_rest(market.token_up_id)
 
         # 6. FAIR VALUE → phat, sigma
-        fv = estimate_fair_value(self.price_buffer)
+        fv = estimate_fair_value(self.price_buffer, duration_min=market.duration_seconds / 60.0)
         if fv is None:
             await self._broadcast_round(
                 "skip", "Fair value no listo (pocos datos)",
@@ -476,6 +467,15 @@ class TradingEngine:
         if self.on_signal:
             await self.on_signal(self._last_signals)
 
+        # 9b. KILL SWITCH (after signals so dashboard always updates)
+        if get("kill_switch_enabled", True):
+            kill = await check_kill_switch()
+            if not kill:
+                logger.warning("Round %d: KILL SWITCH — %s", self._round, kill.reason)
+                await self._broadcast_round("halt", kill.reason, market_name=market_name)
+                await self._log_decision(market_name, "kill_switch", tau=tau)
+                return
+
         logger.info(
             "Round %d | FV P(up)=%.1f%% mkt=%.1f%% | P(dn)=%.1f%% mkt=%.1f%% | "
             "vol=%.4f%% drift=%.4f%% | edge=%s %.1f%% | tau=%.0f eq=%.3f",
@@ -487,9 +487,6 @@ class TradingEngine:
             edge_result.edge * 100,
             tau, conformal.eq,
         )
-
-        # Record paper trade (always, for tracking)
-        await self._fair_value_paper_round(market, fv, price_up, price_down, edge_result)
 
         if not edge_result.has_edge:
             await self._broadcast_round(
@@ -504,8 +501,8 @@ class TradingEngine:
             )
             return
 
-        # Edge band filter
-        min_edge = get("min_edge", 0.06)
+        # Edge band filter (dynamic: base + eq*0.5)
+        min_edge = dynamic_min_edge()
         max_edge = get("max_edge", 0.20)
         if edge_result.edge < min_edge:
             await self._broadcast_round(
@@ -515,6 +512,7 @@ class TradingEngine:
             )
             return
         if edge_result.edge > max_edge:
+            logger.info("Round %d: SKIP max_edge (%.1f%% > %.0f%%)", self._round, edge_result.edge*100, max_edge*100)
             await self._broadcast_round(
                 "skip",
                 f"Edge excesivo ({edge_result.edge*100:.1f}% > {max_edge*100:.0f}%) — modelo sobreconfiado",
@@ -523,6 +521,21 @@ class TradingEngine:
             return
 
         side = edge_result.side
+
+        # 9c. DRIFT ALIGNMENT — drift opposing trade side → 0% WR historically
+        if fv.drift_5m != 0:
+            drift_dir = "up" if fv.drift_5m > 0 else "down"
+            if drift_dir != side:
+                await self._broadcast_round(
+                    "skip",
+                    f"Drift contra side: drift={drift_dir} vs trade={side}",
+                    market_name=market_name,
+                )
+                await self._log_decision(
+                    market_name, "drift_misalign", tau=tau,
+                    edge=edge_result.edge, p_hat=fv.prob_up,
+                )
+                return
 
         # 10. CHECK REGIME EDGE (v2)
         if side == "up":
@@ -539,8 +552,10 @@ class TradingEngine:
             microspike=microspike,
             delta_dir=delta_dir,
             side=side,
+            duration=market.duration_seconds,
         )
         if not regime_check:
+            logger.info("Round %d: SKIP regime: %s", self._round, regime_check.reason)
             await self._broadcast_round("skip", regime_check.reason, market_name=market_name)
             await self._log_decision(
                 market_name, "regime_block", tau=tau,
@@ -557,6 +572,7 @@ class TradingEngine:
             edge=edge_result.edge,
         )
         if not endgame_check:
+            logger.info("Round %d: SKIP endgame: %s", self._round, endgame_check.reason)
             await self._broadcast_round("skip", endgame_check.reason, market_name=market_name)
             await self._log_decision(
                 market_name, "endgame_block", tau=tau,
@@ -614,9 +630,20 @@ class TradingEngine:
         min_ep = get("min_entry_price", 0.35)
         max_ep = get("max_entry_price", 0.65)
         if entry_price < min_ep or entry_price > max_ep:
+            logger.info("Round %d: SKIP entry_price %.2f fuera de [%.2f, %.2f]", self._round, entry_price, min_ep, max_ep)
             await self._broadcast_round(
                 "skip",
                 f"Precio {entry_price:.2f} fuera de rango [{min_ep}, {max_ep}]",
+                market_name=market_name,
+            )
+            return
+
+        # Max slippage pre-trade: spread > 5¢ implies slippage > 5¢ → 14% WR
+        max_slippage = 0.05
+        if trade_spread is not None and trade_spread > max_slippage:
+            await self._broadcast_round(
+                "skip",
+                f"Slippage esperado alto ({trade_spread*100:.1f}¢ > {max_slippage*100:.0f}¢)",
                 market_name=market_name,
             )
             return
@@ -660,7 +687,22 @@ class TradingEngine:
         phat = fv.prob_up if side == "up" else fv.prob_down
         p_hat_low = conformal.conformal_low(phat)
         p_req = entry_price * (1 + TAKER_FEE)
+        # Hard floor: p_hat_low < 0.65 has 25% WR historically
+        min_p_hat_low = 0.65
+        if p_hat_low < min_p_hat_low:
+            logger.info("Round %d: SKIP p_hat_low=%.3f < floor %.2f", self._round, p_hat_low, min_p_hat_low)
+            await self._broadcast_round(
+                "skip",
+                f"Confianza baja: p_hat_low={p_hat_low:.3f} < {min_p_hat_low}",
+                market_name=market_name,
+            )
+            await self._log_decision(
+                market_name, "phat_low_floor", tau=tau,
+                p_hat=phat, p_hat_low=p_hat_low, edge=edge_result.edge,
+            )
+            return
         if p_hat_low < p_req:
+            logger.info("Round %d: SKIP conformal p_hat_low=%.3f < p_req=%.3f", self._round, p_hat_low, p_req)
             await self._broadcast_round(
                 "skip",
                 f"Conformal: p_hat_low={p_hat_low:.3f} < p_req={p_req:.3f}",
@@ -673,7 +715,26 @@ class TradingEngine:
             )
             return
 
-        # 15. EXECUTE IOC
+        # 15. RAG PATTERN CHECK — penalize edge if similar past trades lost
+        rag_signal = 0.0
+        if self.pattern_store is not None and get("rag_enabled", True):
+            features = self._build_features()
+            if features is not None:
+                rag_signal = self.pattern_store.query(features)
+                if rag_signal < -0.3:
+                    # Similar historical patterns mostly lost → block
+                    await self._broadcast_round(
+                        "skip",
+                        f"RAG: patrones similares perdieron (signal={rag_signal:.2f})",
+                        market_name=market_name,
+                    )
+                    await self._log_decision(
+                        market_name, "rag_block", tau=tau,
+                        edge=edge_result.edge, p_hat=phat,
+                    )
+                    return
+
+        # 16. EXECUTE IOC
         signal_details = {
             "model": "fair_value_v2",
             "prob_estimated": edge_result.prob,
@@ -684,6 +745,7 @@ class TradingEngine:
             "eq": conformal.eq,
             "microspike": microspike,
             "p_hat_low": p_hat_low,
+            "rag_signal": rag_signal,
         }
         result = await execute_trade(
             condition_id=market.condition_id,
@@ -699,6 +761,8 @@ class TradingEngine:
             best_price=best_price,
             tau_at_entry=tau,
             phat_at_entry=phat,
+            market_duration=market.duration_seconds,
+            orderbook=self.polymarket_ws.orderbook,
         )
 
         if not result.success:
@@ -824,7 +888,7 @@ class TradingEngine:
                             "STOP-LOSS triggered: bid=%.2f¢ <= stop=%.2f¢",
                             bid * 100, stop_price * 100,
                         )
-                        exit_result = await exit_position(token_id, result.shares, bid)
+                        exit_result = await exit_position(token_id, result.shares, bid, orderbook=self.polymarket_ws.orderbook)
                         if exit_result["success"]:
                             early_exit = "stop_loss"
                             exit_proceeds = exit_result["proceeds"]
@@ -837,7 +901,7 @@ class TradingEngine:
                             "TAKE-PROFIT triggered: bid=%.2f¢ >= tp=%.2f¢",
                             bid * 100, take_profit_price * 100,
                         )
-                        exit_result = await exit_position(token_id, result.shares, bid)
+                        exit_result = await exit_position(token_id, result.shares, bid, orderbook=self.polymarket_ws.orderbook)
                         if exit_result["success"]:
                             early_exit = "take_profit"
                             exit_proceeds = exit_result["proceeds"]
@@ -916,6 +980,15 @@ class TradingEngine:
             won_for_stats = outcome_label in ("win", "take_profit")
             await record_outcome(won_for_stats, pnl, new_bankroll)
             await update_daily_stats(pnl, won_for_stats, new_bankroll)
+
+            # Log performance by timeframe
+            tf_label = f"{market.duration_seconds // 60}m"
+            tf_stats = await self._get_timeframe_stats(market.duration_seconds)
+            if tf_stats:
+                logger.info(
+                    "TF_%s stats: %d trades, WR=%.0f%%, PnL=$%.2f",
+                    tf_label, tf_stats["count"], tf_stats["wr"] * 100, tf_stats["pnl"],
+                )
 
             # Update conformal tracker with actual outcome
             if phat is not None:
@@ -1063,7 +1136,7 @@ class TradingEngine:
         def safe(v):
             return v if v is not None else 0.0
 
-        time_in_candle = max(0.0, min(1.0, self._market_seconds_remaining / 300.0))
+        time_in_candle = max(0.0, min(1.0, self._market_seconds_remaining / self._market_duration))
 
         features = [
             safe(snap["ret_1m"]),
@@ -1078,26 +1151,13 @@ class TradingEngine:
         return np.array(features, dtype=np.float32)
 
     async def _check_resolution_with_retry(self, market, side: str) -> bool | None:
-        """Check if our trade won or lost, with retries for live mode.
+        """Check if our trade won or lost, with retries.
 
-        Queries the market resolution. In dry_run, simulates based on price movement.
+        Prefer real market resolution via CLOB API (even in dry_run). Fallback to BTC return if API fails.
         """
         dry_run = get("dry_run", True)
 
-        if dry_run:
-            # Simulate: use actual BTC price movement
-            ret = self.price_buffer.ret(5)
-            if ret is None:
-                # 50/50 if no data
-                import random
-                return random.random() > 0.5
-            btc_went_up = ret > 0
-            if side == "up":
-                return btc_went_up
-            else:
-                return not btc_went_up
-
-        # Real resolution: query CLOB API with retry
+        # Try real resolution first for parity between paper and live
         import httpx
         token_id = market.token_up_id if side == "up" else market.token_down_id
         for attempt in range(4):
@@ -1110,50 +1170,26 @@ class TradingEngine:
                     data = resp.json()
                     if data.get("closed"):
                         # Find our token in the response
-                        for tok in data.get("tokens", []):
-                            if tok.get("token_id") == token_id:
-                                won = tok.get("winner", False)
-                                logger.info("Resolution via CLOB: %s (token matched)", "WIN" if won else "LOSS")
-                                return won
-                        # Fallback: match by outcome name
-                        for tok in data.get("tokens", []):
-                            outcome = (tok.get("outcome") or "").lower()
-                            if (side == "up" and outcome in ("up", "yes")) or \
-                               (side == "down" and outcome in ("down", "no")):
-                                won = tok.get("winner", False)
-                                logger.info("Resolution via CLOB: %s (outcome matched)", "WIN" if won else "LOSS")
-                                return won
-                        logger.warning("Market closed but couldn't match token/outcome")
-                    else:
-                        logger.info("Market not yet closed (attempt %d/4), waiting 10s...", attempt + 1)
-                    await asyncio.sleep(10)
-            except Exception as e:
-                logger.warning("Resolution check attempt %d failed: %s", attempt + 1, e)
-                await asyncio.sleep(5)
-
-        # All CLOB retries exhausted — fallback to on-chain with retries
-        # 5-min markets can take up to ~2 min to resolve on-chain
-        logger.warning("CLOB resolution not available after 4 retries, trying on-chain")
-        from bot.wallet import get_winning_outcome
-        for on_chain_attempt in range(8):
-            try:
-                winning_side = get_winning_outcome(market.condition_id)
-                if winning_side is not None:
-                    won = (winning_side == side)
-                    logger.info(
-                        "On-chain fallback: %s won, our side=%s → %s",
-                        winning_side.upper(), side.upper(), "WIN" if won else "LOSS",
-                    )
-                    return won
-                else:
-                    logger.info("On-chain attempt %d/8: not yet resolved, waiting 15s...", on_chain_attempt + 1)
-                    await asyncio.sleep(15)
-            except Exception as e:
-                logger.warning("On-chain attempt %d/8 failed: %s", on_chain_attempt + 1, e)
-                await asyncio.sleep(5)
-
-        # All resolution methods exhausted — return None to leave trade PENDING
-        logger.warning("All resolution methods failed, leaving trade PENDING for next recovery")
+                        assets = data.get("assets") or []
+                        chose = None
+                        for a in assets:
+                            if a.get("token_id") == token_id:
+                                chose = a
+                                break
+                        if chose is not None:
+                            # Resolution: outcome token pays 1 if it corresponds to winning indexSet
+                            # For up/down markets, winning index_set = 1 for up, 2 for down
+                            win_index = 1 if side == "up" else 2
+                            # If our token's index_set equals win_index, we win
+                            return chose.get("index_set") == win_index
+                await asyncio.sleep(2)
+            except Exception:
+                await asyncio.sleep(2)
+        # CLOB failed — leave PENDING for recovery loop to retry later
+        logger.warning(
+            "Resolution not available after 4 CLOB retries for %s, leaving PENDING",
+            market.condition_id[:16],
+        )
         return None
 
     async def _sync_balance(self):
@@ -1269,148 +1305,39 @@ class TradingEngine:
         except Exception as e:
             logger.error("Auto-tune error: %s", e, exc_info=True)
 
+    async def _get_timeframe_stats(self, duration: int) -> dict | None:
+        """Get WR and PnL for a specific market duration."""
+        try:
+            db = await get_db()
+            try:
+                cursor = await db.execute(
+                    """SELECT COUNT(*) as cnt,
+                              SUM(CASE WHEN outcome IN ('win','take_profit') THEN 1 ELSE 0 END) as wins,
+                              SUM(pnl) as total_pnl
+                       FROM trades
+                       WHERE outcome IS NOT NULL
+                         AND market_duration = ?""",
+                    (duration,),
+                )
+                row = await cursor.fetchone()
+            finally:
+                await db.close()
+            if not row or row["cnt"] == 0:
+                return None
+            return {
+                "count": row["cnt"],
+                "wr": row["wins"] / row["cnt"],
+                "pnl": row["total_pnl"] or 0.0,
+            }
+        except Exception:
+            return None
+
     async def _check_daily_reset(self):
         """Reset daily counters at midnight UTC."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         last_reset = await state.get("daily_reset_date", "")
         if last_reset != today:
             await reset_daily()
-
-    async def _fair_value_paper_round(self, market, fv, price_up, price_down, edge_result):
-        """Record paper trade if edge is found (for ongoing model validation)."""
-        try:
-            if not edge_result.has_edge:
-                return
-
-            db = await get_db()
-            try:
-                cursor = await db.execute(
-                    "SELECT COUNT(*) c FROM paper_trades WHERE condition_id = ? AND outcome IS NULL",
-                    (market.condition_id,),
-                )
-                row = await cursor.fetchone()
-                if row and row["c"] > 0:
-                    return
-
-                btc_price = self.price_buffer.current_price
-                await db.execute(
-                    """INSERT INTO paper_trades
-                       (timestamp, condition_id, side, prob_estimated, market_price,
-                        edge, vol_5m, drift_5m, price_up, price_down, btc_price)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        datetime.now(timezone.utc).isoformat(),
-                        market.condition_id,
-                        edge_result.side,
-                        edge_result.prob,
-                        edge_result.market_price,
-                        edge_result.edge,
-                        fv.vol_5m,
-                        fv.drift_5m,
-                        price_up,
-                        price_down,
-                        btc_price,
-                    ),
-                )
-                await db.commit()
-
-                logger.info(
-                    "PAPER TRADE: %s @ %.1f¢ (prob=%.1f%%, edge=+%.1f%%)",
-                    edge_result.side.upper(),
-                    edge_result.market_price * 100,
-                    edge_result.prob * 100,
-                    edge_result.edge * 100,
-                )
-            finally:
-                await db.close()
-
-        except Exception as e:
-            logger.warning("Fair value paper round error: %s", e)
-
-    async def _resolve_paper_trades(self):
-        """Resolve pending paper trades by checking market outcomes."""
-        db = await get_db()
-        try:
-            # Auto-expire paper trades older than 15 min (market should resolve in ~6 min)
-            from datetime import timedelta
-            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
-            expired = await db.execute(
-                """UPDATE paper_trades SET outcome = 'expired', pnl_simulated = 0,
-                   resolved_at = ? WHERE outcome IS NULL AND timestamp < ?""",
-                (datetime.now(timezone.utc).isoformat(), cutoff),
-            )
-            if expired.rowcount > 0:
-                await db.commit()
-                logger.info("Expired %d stale paper trades (>15 min unresolved)", expired.rowcount)
-
-            cursor = await db.execute(
-                """SELECT id, condition_id, side, market_price, prob_estimated
-                   FROM paper_trades WHERE outcome IS NULL
-                   ORDER BY id ASC LIMIT 20"""
-            )
-            pending = await cursor.fetchall()
-        finally:
-            await db.close()
-
-        if not pending:
-            return
-
-        import httpx
-        for pt in pending:
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    resp = await client.get(
-                        f"https://clob.polymarket.com/markets/{pt['condition_id']}"
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-
-                if not data.get("closed"):
-                    continue
-
-                # Determine winner
-                side = pt["side"]
-                won = None
-                for tok in data.get("tokens", []):
-                    outcome_name = (tok.get("outcome") or "").lower()
-                    if (side == "up" and outcome_name in ("up", "yes")) or \
-                       (side == "down" and outcome_name in ("down", "no")):
-                        won = tok.get("winner", False)
-                        break
-
-                if won is None:
-                    continue
-
-                # Calculate simulated PnL
-                # Simulated $1 bet: win = $1/price - $1*(1+fee), loss = -$1*(1+fee)
-                entry_cost = 1.0 * (1 + 0.10)  # $1 bet + 10% fee
-                if won:
-                    pnl = (1.0 / pt["market_price"]) - entry_cost
-                    outcome = "win"
-                else:
-                    pnl = -entry_cost
-                    outcome = "loss"
-
-                db = await get_db()
-                try:
-                    await db.execute(
-                        """UPDATE paper_trades SET outcome = ?, pnl_simulated = ?,
-                           resolved_at = ? WHERE id = ?""",
-                        (outcome, round(pnl, 4),
-                         datetime.now(timezone.utc).isoformat(), pt["id"]),
-                    )
-                    await db.commit()
-                finally:
-                    await db.close()
-
-                logger.info(
-                    "PAPER RESOLVED: #%d %s %s → pnl=$%.3f (prob_est=%.1f%% mkt=%.1f¢)",
-                    pt["id"], side.upper(), outcome.upper(), pnl,
-                    pt["prob_estimated"] * 100, pt["market_price"] * 100,
-                )
-
-            except Exception as e:
-                logger.debug("Paper trade resolution error for #%d: %s", pt["id"], e)
 
     async def get_status(self) -> dict:
         """Get current engine status for API/dashboard."""

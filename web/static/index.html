@@ -5,9 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polybot</title>
     <link rel="manifest" href="/static/manifest.json">
-    <meta name="theme-color" content="#8b5cf6">
+    <meta name="theme-color" content="#f4f3ef">
     <link rel="apple-touch-icon" href="/static/icon-192.png">
-    <link rel="stylesheet" href="/static/style.css?v=18">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=23">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
@@ -16,7 +19,7 @@
             <h1>POLYBOT</h1>
             <div class="btc-ticker" id="btcTicker">
                 <span>BTC</span>
-                <span class="price" id="btcPrice">—</span>
+                <span class="price" id="btcPrice">&mdash;</span>
                 <span class="change" id="btcChange"></span>
             </div>
         </div>
@@ -28,38 +31,43 @@
             </div>
         </div>
     </header>
-    <div style="padding:4px 0;background:rgba(255,200,0,0.08);border-bottom:1px solid rgba(255,200,0,0.15);text-align:center;font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:0.3px">
-        EXPERIMENTAL &mdash; Not Financial Advice &middot; DYOR &middot; Use at your own risk
+    <div style="padding:5px 0;background:var(--surface-2);border-bottom:1px solid var(--border);text-align:center;font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:0.5px;font-weight:500">
+        EXPERIMENTAL &mdash; Not Financial Advice &middot; DYOR
     </div>
-    <div id="trainingBanner" style="display:none;padding:6px 0;background:rgba(34,211,238,0.08);border-bottom:1px solid rgba(34,211,238,0.15);text-align:center;font-family:var(--font-sans);font-size:11px;color:#22d3ee;letter-spacing:0.5px">
-        &#x1f9ea; TRAINING MODE &mdash; Simulating trades, no real money at risk. Feeding RAG pattern store.
+    <div id="trainingBanner" style="display:none;padding:6px 0;background:var(--surface-2);border-bottom:1px solid var(--border);text-align:center;font-family:var(--font-sans);font-size:11px;color:var(--blue);letter-spacing:0.8px;font-weight:600">
+        TRAINING MODE &mdash; Simulating trades, no real money at risk
     </div>
 
-    <!-- Goal Tracker -->
-    <div class="goal-bar" id="goalBar">
-        <div class="goal-info">
-            <span class="goal-label">GOAL: $1,000</span>
-            <span class="goal-detail" id="goalDetail">—</span>
-            <span class="goal-days" id="goalDays">—</span>
+    <!-- Global Filter Bar -->
+    <div class="filter-bar" id="filterBar">
+        <div class="filter-group">
+            <span class="filter-group-label">Mode</span>
+            <button class="pill active" data-filter="mode" data-value="all">All</button>
+            <button class="pill" data-filter="mode" data-value="paper">Paper</button>
+            <button class="pill" data-filter="mode" data-value="live">Live</button>
         </div>
-        <div class="goal-track">
-            <div class="goal-fill" id="goalFill" style="width:0%"></div>
+        <div class="filter-group">
+            <span class="filter-group-label">Market</span>
+            <button class="pill active" data-filter="duration" data-value="0">All</button>
+            <button class="pill" data-filter="duration" data-value="300">5m</button>
+            <button class="pill" data-filter="duration" data-value="900">15m</button>
+        </div>
+        <div class="filter-group">
+            <span class="filter-group-label">Range</span>
+            <button class="pill" data-filter="range" data-value="1h">1H</button>
+            <button class="pill" data-filter="range" data-value="6h">6H</button>
+            <button class="pill" data-filter="range" data-value="1d">1D</button>
+            <button class="pill active" data-filter="range" data-value="7d">7D</button>
+            <button class="pill" data-filter="range" data-value="30d">30D</button>
+            <button class="pill" data-filter="range" data-value="all">ALL</button>
         </div>
     </div>
 
     <div class="container">
-        <!-- Stats Date Filter -->
-        <div class="stats-date-filter">
-            <span class="stats-filter-label">Periodo:</span>
-            <button class="chart-filter-btn active" data-stats="all">All</button>
-            <button class="chart-filter-btn" data-stats="today">Hoy</button>
-            <button class="chart-filter-btn" data-stats="custom">Custom</button>
-            <input type="date" class="stats-date-input" id="statsDateInput" style="display:none">
-        </div>
         <!-- Stat Cards -->
         <div class="grid grid-4">
             <div class="card stat-card glow-green">
-                <div class="card-header">Wallet Real</div>
+                <div class="card-header">Bankroll</div>
                 <div class="card-value" id="walletTotal">&mdash;</div>
                 <div class="card-sub" id="walletDeposit"></div>
             </div>
@@ -81,225 +89,173 @@
             </div>
         </div>
 
-        <!-- Equity Curve -->
-        <div class="card" style="margin-bottom: 20px">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-                <div class="card-header" style="margin:0">Equity Curve</div>
-                <div class="chart-filters" id="chartFilters">
-                    <button class="chart-filter-btn" data-range="1h">1H</button>
-                    <button class="chart-filter-btn" data-range="6h">6H</button>
-                    <button class="chart-filter-btn" data-range="1d">1D</button>
-                    <button class="chart-filter-btn active" data-range="7d">7D</button>
-                    <button class="chart-filter-btn" data-range="30d">30D</button>
-                    <button class="chart-filter-btn" data-range="all">ALL</button>
-                </div>
-            </div>
-            <div class="chart-container">
+        <!-- Equity Chart (hero) -->
+        <div class="card" style="margin-bottom: 24px">
+            <div class="card-header" style="margin:0 0 8px">Equity Curve</div>
+            <div class="chart-container-hero">
                 <canvas id="equityChart"></canvas>
             </div>
         </div>
 
-        <!-- Live Status -->
-        <div class="card" style="margin-bottom: 20px">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-                <div class="card-header" style="margin:0">Live Status</div>
-                <span class="live-pulse" id="livePulse"></span>
-            </div>
-            <div class="live-status-grid" id="liveStatus">
-                <div class="ls-item">
-                    <span class="ls-label">Estado</span>
-                    <span class="ls-value" id="lsState">OFFLINE</span>
-                </div>
-                <div class="ls-item">
-                    <span class="ls-label">Mercado</span>
-                    <span class="ls-value ls-mono" id="lsMarket">&mdash;</span>
-                </div>
-                <div class="ls-item">
-                    <span class="ls-label">Señal</span>
-                    <span class="ls-value" id="lsSignal">&mdash;</span>
-                </div>
-                <div class="ls-item ls-wide">
-                    <span class="ls-label">Última decisión</span>
-                    <span class="ls-value" id="lsDecision">&mdash;</span>
-                </div>
-                <div class="ls-item">
-                    <span class="ls-label">Rounds</span>
-                    <span class="ls-value ls-mono" id="lsRounds">0</span>
-                </div>
-                <div class="ls-item">
-                    <span class="ls-label">Último update</span>
-                    <span class="ls-value ls-mono" id="lsTime">&mdash;</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Fair Value Paper Trading -->
-        <div class="card" style="margin-bottom: 20px" id="paperSection">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-                <div class="card-header" style="margin:0">Paper Validation</div>
-                <span class="badge badge-paper" id="paperStatus">--</span>
-            </div>
-            <div class="grid grid-4" style="margin:12px 0 8px" id="paperStats">
-                <div style="text-align:center">
-                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Trades</div>
-                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono)" id="paperTotal">0</div>
-                </div>
-                <div style="text-align:center">
-                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Win Rate</div>
-                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono)" id="paperWR">--</div>
-                </div>
-                <div style="text-align:center">
-                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Sim P&amp;L</div>
-                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono)" id="paperPnl">$0.00</div>
-                </div>
-                <div style="text-align:center">
-                    <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">Pending</div>
-                    <div style="font-size:18px;font-weight:700;font-family:var(--font-mono);color:var(--text-dim)" id="paperPending">0</div>
-                </div>
-            </div>
-            <div class="table-wrap" style="max-height:200px">
+        <!-- Unified Trades Table -->
+        <div class="card" style="margin-bottom: 24px">
+            <div class="card-header" style="margin:0 0 8px">Trades</div>
+            <div class="table-wrap" style="max-height:500px">
                 <table>
                     <thead>
                         <tr>
-                            <th>Time</th>
-                            <th>Side</th>
-                            <th>P(est)</th>
-                            <th>Mkt</th>
-                            <th>Edge</th>
-                            <th>Vol</th>
-                            <th>Result</th>
+                            <th class="sortable" data-sort="timestamp">Time</th>
+                            <th>Type</th>
+                            <th>Market</th>
+                            <th class="sortable" data-sort="side">Side</th>
+                            <th class="sortable" data-sort="size_usd">Size</th>
+                            <th>Price</th>
+                            <th>BTC</th>
+                            <th class="sortable" data-sort="pnl">P&amp;L</th>
                         </tr>
                     </thead>
-                    <tbody id="paperBody"></tbody>
+                    <tbody id="tradesBody"></tbody>
                 </table>
             </div>
         </div>
 
-        <!-- Trades + Signals/Risk -->
-        <div class="grid grid-2">
-            <!-- Live Trades -->
-            <div class="card" style="display:flex;flex-direction:column">
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                    <div class="card-header" style="margin:0">Trades</div>
-                    <div class="chart-filters" id="modeFilters">
-                        <button class="chart-filter-btn active" data-mode="all">All</button>
-                        <button class="chart-filter-btn" data-mode="paper">Paper</button>
-                        <button class="chart-filter-btn" data-mode="live">Live</button>
+        <!-- Collapsible Panels -->
+
+        <!-- Live Status -->
+        <div class="collapsible-panel" data-panel="live-status">
+            <button class="collapsible-header" onclick="togglePanel(this)">
+                <span>Live Status</span>
+                <span class="live-pulse" id="livePulse"></span>
+                <span class="chevron">&#9662;</span>
+            </button>
+            <div class="collapsible-body open">
+                <div class="live-status-grid" id="liveStatus">
+                    <div class="ls-item">
+                        <span class="ls-label">Status</span>
+                        <span class="ls-value" id="lsState">OFFLINE</span>
                     </div>
-                </div>
-                <div class="table-wrap" style="flex:1;min-height:0">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Signal</th>
-                                <th>Side</th>
-                                <th>Size</th>
-                                <th>Price</th>
-                                <th>BTC</th>
-                                <th>Result</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tradesBody"></tbody>
-                    </table>
+                    <div class="ls-item">
+                        <span class="ls-label">Market</span>
+                        <span class="ls-value ls-mono" id="lsMarket">&mdash;</span>
+                    </div>
+                    <div class="ls-item">
+                        <span class="ls-label">Signal</span>
+                        <span class="ls-value" id="lsSignal">&mdash;</span>
+                    </div>
+                    <div class="ls-item ls-wide">
+                        <span class="ls-label">Last Decision</span>
+                        <span class="ls-value" id="lsDecision">&mdash;</span>
+                    </div>
+                    <div class="ls-item">
+                        <span class="ls-label">Rounds</span>
+                        <span class="ls-value ls-mono" id="lsRounds">0</span>
+                    </div>
+                    <div class="ls-item">
+                        <span class="ls-label">Last Update</span>
+                        <span class="ls-value ls-mono" id="lsTime">&mdash;</span>
+                    </div>
                 </div>
             </div>
+        </div>
 
-            <!-- Signals + Risk column -->
-            <div>
-                <!-- Fair Value Panel -->
-                <div class="card" style="margin-bottom: 16px">
-                    <div class="card-header">Fair Value Model</div>
-
-                    <!-- Edge + Side hero -->
-                    <div class="fv-hero" id="fvHero">
-                        <div class="fv-side" id="fvSide">&mdash;</div>
-                        <div class="fv-edge-row">
-                            <span class="fv-edge-label">Edge</span>
-                            <span class="fv-edge-value" id="fvEdge">&mdash;</span>
-                        </div>
-                        <div class="fv-explanation" id="fvExplanation">Calculando fair value...</div>
+        <!-- Fair Value Model -->
+        <div class="collapsible-panel" data-panel="fair-value">
+            <button class="collapsible-header" onclick="togglePanel(this)">
+                <span>Fair Value Model</span>
+                <span class="chevron">&#9662;</span>
+            </button>
+            <div class="collapsible-body">
+                <!-- Edge + Side hero -->
+                <div class="fv-hero" id="fvHero">
+                    <div class="fv-side" id="fvSide">&mdash;</div>
+                    <div class="fv-edge-row">
+                        <span class="fv-edge-label">Edge</span>
+                        <span class="fv-edge-value" id="fvEdge">&mdash;</span>
                     </div>
-
-                    <hr class="divider">
-
-                    <!-- FV metrics as compact grid -->
-                    <div class="fv-metrics">
-                        <div class="fv-metric">
-                            <div class="fv-metric-label">P(up)</div>
-                            <div class="fv-metric-value" id="fvProbUp">&mdash;</div>
-                            <div class="fv-metric-bar"><div class="fv-metric-fill" id="fvProbUpBar" style="width:50%"></div></div>
-                        </div>
-                        <div class="fv-metric">
-                            <div class="fv-metric-label">P(down)</div>
-                            <div class="fv-metric-value" id="fvProbDown">&mdash;</div>
-                            <div class="fv-metric-bar"><div class="fv-metric-fill down" id="fvProbDownBar" style="width:50%"></div></div>
-                        </div>
-                        <div class="fv-metric">
-                            <div class="fv-metric-label">Vol σ</div>
-                            <div class="fv-metric-value" id="fvVol">&mdash;</div>
-                        </div>
-                        <div class="fv-metric">
-                            <div class="fv-metric-label">Drift μ</div>
-                            <div class="fv-metric-value" id="fvDrift">&mdash;</div>
-                        </div>
-                        <div class="fv-metric">
-                            <div class="fv-metric-label">Mkt UP</div>
-                            <div class="fv-metric-value" id="fvMktUp">&mdash;</div>
-                        </div>
-                        <div class="fv-metric">
-                            <div class="fv-metric-label">Mkt DOWN</div>
-                            <div class="fv-metric-value" id="fvMktDown">&mdash;</div>
-                        </div>
+                    <div class="fv-explanation" id="fvExplanation">Computing fair value...</div>
+                </div>
+                <hr class="divider">
+                <div class="fv-metrics">
+                    <div class="fv-metric">
+                        <div class="fv-metric-label">P(up)</div>
+                        <div class="fv-metric-value" id="fvProbUp">&mdash;</div>
+                        <div class="fv-metric-bar"><div class="fv-metric-fill" id="fvProbUpBar" style="width:50%"></div></div>
+                    </div>
+                    <div class="fv-metric">
+                        <div class="fv-metric-label">P(down)</div>
+                        <div class="fv-metric-value" id="fvProbDown">&mdash;</div>
+                        <div class="fv-metric-bar"><div class="fv-metric-fill down" id="fvProbDownBar" style="width:50%"></div></div>
+                    </div>
+                    <div class="fv-metric">
+                        <div class="fv-metric-label">Vol &sigma;</div>
+                        <div class="fv-metric-value" id="fvVol">&mdash;</div>
+                    </div>
+                    <div class="fv-metric">
+                        <div class="fv-metric-label">Drift &mu;</div>
+                        <div class="fv-metric-value" id="fvDrift">&mdash;</div>
+                    </div>
+                    <div class="fv-metric">
+                        <div class="fv-metric-label">Mkt UP</div>
+                        <div class="fv-metric-value" id="fvMktUp">&mdash;</div>
+                    </div>
+                    <div class="fv-metric">
+                        <div class="fv-metric-label">Mkt DOWN</div>
+                        <div class="fv-metric-value" id="fvMktDown">&mdash;</div>
                     </div>
                 </div>
 
-                <!-- Risk Panel -->
-                <div class="card">
-                    <div class="card-header">Risk Status</div>
-                    <div id="riskPanel">
-                        <div class="risk-item">
-                            <div class="risk-icon blue">#</div>
-                            <div class="risk-info">
-                                <div class="label">Loss Streak</div>
-                                <div class="value" id="riskStreak">0</div>
-                            </div>
+            </div>
+        </div>
+
+        <!-- Risk Status -->
+        <div class="collapsible-panel" data-panel="risk">
+            <button class="collapsible-header" onclick="togglePanel(this)">
+                <span>Risk</span>
+                <span class="chevron">&#9662;</span>
+            </button>
+            <div class="collapsible-body">
+                <div id="riskPanel">
+                    <div class="risk-item">
+                        <div class="risk-icon blue">#</div>
+                        <div class="risk-info">
+                            <div class="label">Loss Streak</div>
+                            <div class="value" id="riskStreak">0</div>
                         </div>
-                        <div class="risk-item">
-                            <div class="risk-icon green">$</div>
-                            <div class="risk-info">
-                                <div class="label">Daily Loss</div>
-                                <div class="value" id="riskDailyLoss">$0.00</div>
-                                <div class="progress-bar"><div class="progress-fill" id="riskDailyBar" style="width:0%"></div></div>
-                            </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon green">$</div>
+                        <div class="risk-info">
+                            <div class="label">Daily Loss</div>
+                            <div class="value" id="riskDailyLoss">$0.00</div>
+                            <div class="progress-bar"><div class="progress-fill" id="riskDailyBar" style="width:0%"></div></div>
                         </div>
-                        <div class="risk-item">
-                            <div class="risk-icon green">&times;</div>
-                            <div class="risk-info">
-                                <div class="label">Sizing Mult</div>
-                                <div class="value" id="riskDrawdown">1.00x</div>
-                            </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon green">&times;</div>
+                        <div class="risk-info">
+                            <div class="label">Sizing Mult</div>
+                            <div class="value" id="riskDrawdown">1.00x</div>
                         </div>
-                        <div class="risk-item">
-                            <div class="risk-icon yellow">||</div>
-                            <div class="risk-info">
-                                <div class="label">Cooldown</div>
-                                <div class="value" id="riskCooldown">No</div>
-                            </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon yellow">||</div>
+                        <div class="risk-info">
+                            <div class="label">Cooldown</div>
+                            <div class="value" id="riskCooldown">No</div>
                         </div>
-                        <div class="risk-item">
-                            <div class="risk-icon green">!</div>
-                            <div class="risk-info">
-                                <div class="label">Circuit Breaker</div>
-                                <div class="value text-green" id="riskCircuit">OK</div>
-                            </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon green">!</div>
+                        <div class="risk-info">
+                            <div class="label">Circuit Breaker</div>
+                            <div class="value text-green" id="riskCircuit">OK</div>
                         </div>
-                        <div class="risk-item">
-                            <div class="risk-icon blue">~</div>
-                            <div class="risk-info">
-                                <div class="label">Trade CD</div>
-                                <div class="value" id="riskTradeCooldown">0s</div>
-                            </div>
+                    </div>
+                    <div class="risk-item">
+                        <div class="risk-icon blue">~</div>
+                        <div class="risk-info">
+                            <div class="label">Trade CD</div>
+                            <div class="value" id="riskTradeCooldown">0s</div>
                         </div>
                     </div>
                 </div>
@@ -308,10 +264,10 @@
     </div>
 
     <div style="margin:24px auto 16px;text-align:center;font-family:var(--font-sans);font-size:11px;color:var(--text-dim)">
-        <a href="/about" style="color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(139,92,246,0.3)">About this experiment</a>
-        &nbsp;&middot;&nbsp; NFA &middot; DYOR &middot; Use at your own risk
+        <a href="/about" style="color:var(--text-secondary);text-decoration:none;border-bottom:1px solid var(--border)">About this experiment</a>
+        &nbsp;&middot;&nbsp; NFA &middot; DYOR
     </div>
 
-    <script src="/static/dashboard.js?v=34"></script>
+    <script src="/static/dashboard.js?v=42"></script>
 </body>
 </html>

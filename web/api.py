@@ -67,10 +67,16 @@ def create_router(engine, ws_manager) -> APIRouter:
         return await engine.get_status()
 
     @router.get("/trades")
-    async def get_trades(limit: int = 50, offset: int = 0, mode: str = "all"):
+    async def get_trades(limit: int = 50, offset: int = 0, mode: str = "all", duration: int = 0):
         db = await get_db()
         try:
-            where = _mode_filter(mode)
+            clauses = []
+            mode_f = _mode_filter(mode, prefix="")
+            if mode_f:
+                clauses.append(mode_f)
+            if duration > 0:
+                clauses.append(f"COALESCE(market_duration, 300) = {int(duration)}")
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             cursor = await db.execute(
                 f"SELECT * FROM trades {where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
@@ -126,11 +132,39 @@ def create_router(engine, ws_manager) -> APIRouter:
         finally:
             await db.close()
 
-    @router.get("/stats/summary")
-    async def get_summary(mode: str = "all"):
+    @router.get("/stats/hourly")
+    async def get_hourly_stats(mode: str = "all"):
+        """Performance breakdown by hour UTC — for learning optimal trading hours."""
         db = await get_db()
         try:
             mode_cond = _mode_filter(mode, prefix="AND")
+            cursor = await db.execute(
+                f"""SELECT
+                    CAST(strftime('%H', timestamp) AS INTEGER) as hour_utc,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN outcome IN ('win','take_profit') THEN 1 ELSE 0 END) as wins,
+                    COALESCE(SUM(pnl), 0) as pnl
+                FROM trades
+                WHERE outcome IS NOT NULL {mode_cond}
+                GROUP BY hour_utc
+                ORDER BY hour_utc"""
+            )
+            rows = await cursor.fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                d["win_rate"] = d["wins"] / d["total"] if d["total"] > 0 else 0
+                result.append(d)
+            return result
+        finally:
+            await db.close()
+
+    @router.get("/stats/summary")
+    async def get_summary(mode: str = "all", duration: int = 0):
+        db = await get_db()
+        try:
+            mode_cond = _mode_filter(mode, prefix="AND")
+            dur_cond = f"AND COALESCE(market_duration, 300) = {int(duration)}" if duration > 0 else ""
             cursor = await db.execute(
                 f"""SELECT
                     COUNT(*) as total_trades,
@@ -139,7 +173,7 @@ def create_router(engine, ws_manager) -> APIRouter:
                     COALESCE(SUM(pnl), 0) as total_pnl,
                     COALESCE(MAX(pnl), 0) as best_trade,
                     COALESCE(MIN(pnl), 0) as worst_trade
-                FROM trades WHERE outcome IS NOT NULL {mode_cond}"""
+                FROM trades WHERE outcome IS NOT NULL {mode_cond} {dur_cond}"""
             )
             row = await cursor.fetchone()
             data = dict(row)
@@ -150,6 +184,106 @@ def create_router(engine, ws_manager) -> APIRouter:
             data["losses"] = losses
             data["win_rate"] = wins / total if total > 0 else 0
             return data
+        finally:
+            await db.close()
+
+    @router.get("/stats/timeframes")
+    async def get_timeframe_stats(mode: str = "all"):
+        """Performance breakdown by market duration (5m, 15m, etc.)."""
+        db = await get_db()
+        try:
+            mode_cond = _mode_filter(mode, prefix="AND")
+            cursor = await db.execute(
+                f"""SELECT
+                    COALESCE(market_duration, 300) as duration,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN outcome IN ('win','take_profit') THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN outcome IN ('loss','stop_loss') THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(pnl), 0) as pnl,
+                    COALESCE(AVG(pnl), 0) as avg_pnl
+                FROM trades
+                WHERE outcome IS NOT NULL {mode_cond}
+                GROUP BY COALESCE(market_duration, 300)
+                ORDER BY duration"""
+            )
+            rows = await cursor.fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                total = (d["wins"] or 0) + (d["losses"] or 0)
+                d["win_rate"] = d["wins"] / total if total > 0 else 0
+                d["label"] = f"{d['duration'] // 60}m"
+                result.append(d)
+            return result
+        finally:
+            await db.close()
+
+    @router.get("/stats/equity-series")
+    async def equity_series(mode: str = "all", duration: int = 0, range: str = "7d"):
+        """Equity curve data for chart — returns live + paper series with rolling WR and cumulative PnL."""
+        db = await get_db()
+        try:
+            range_map = {"1h": 1, "6h": 6, "1d": 24, "7d": 168, "30d": 720}
+            hours = range_map.get(range, 0)
+            time_cond = f"AND timestamp >= datetime('now', '-{hours} hours')" if hours else ""
+            dur_cond = f"AND COALESCE(market_duration, 300) = {int(duration)}" if duration > 0 else ""
+
+            base_where = f"WHERE outcome IS NOT NULL {time_cond} {dur_cond}"
+
+            if mode == "live":
+                base_where += " AND dry_run = 0"
+            elif mode == "paper":
+                base_where += " AND dry_run = 1"
+
+            cursor = await db.execute(
+                f"""SELECT timestamp, bankroll_after, pnl, outcome, dry_run
+                    FROM trades {base_where}
+                    ORDER BY timestamp ASC, id ASC"""
+            )
+            rows = await cursor.fetchall()
+
+            live = []
+            paper = []
+            live_cum_pnl = 0.0
+            paper_cum_pnl = 0.0
+            live_wins = 0
+            live_total = 0
+            paper_wins = 0
+            paper_total = 0
+            WR_WINDOW = 20  # Rolling window for WR
+
+            for r in rows:
+                pnl = r["pnl"] or 0
+                won = r["outcome"] in ("win", "take_profit")
+                if r["dry_run"]:
+                    paper_cum_pnl += pnl
+                    paper_total += 1
+                    if won:
+                        paper_wins += 1
+                    # Rolling WR over last N
+                    start = max(0, paper_total - WR_WINDOW)
+                    window_total = paper_total - start
+                    paper.append({
+                        "ts": r["timestamp"],
+                        "bankroll": r["bankroll_after"],
+                        "pnl": pnl,
+                        "cum_pnl": round(paper_cum_pnl, 2),
+                        "wr": round(paper_wins / paper_total, 3) if paper_total else 0,
+                    })
+                else:
+                    live_cum_pnl += pnl
+                    live_total += 1
+                    if won:
+                        live_wins += 1
+                    live.append({
+                        "ts": r["timestamp"],
+                        "bankroll": r["bankroll_after"],
+                        "pnl": pnl,
+                        "cum_pnl": round(live_cum_pnl, 2),
+                        "wr": round(live_wins / live_total, 3) if live_total else 0,
+                    })
+
+            return {"live": live, "paper": paper}
         finally:
             await db.close()
 
@@ -244,6 +378,23 @@ def create_router(engine, ws_manager) -> APIRouter:
         await engine.stop()
         return {"status": "stopped"}
 
+    @router.post("/bot/restart")
+    async def restart_bot(request: Request):
+        """Restart the entire process to reload code."""
+        _require_admin(request)
+        _audit(request, "BOT_RESTART")
+        import sys
+        logger.warning("RESTART requested via API — re-execing process")
+        # Respond before dying
+        import threading
+        def _restart():
+            import time
+            time.sleep(1)
+            python = sys.executable
+            os.execv(python, [python] + sys.argv)
+        threading.Thread(target=_restart, daemon=True).start()
+        return {"status": "restarting"}
+
     @router.post("/keys/save")
     async def save_keys(request: Request):
         """Save Polymarket API keys to .env file."""
@@ -319,28 +470,28 @@ def create_router(engine, ws_manager) -> APIRouter:
         import asyncio
         from bot.wallet import (
             get_eoa_usdc_balance, get_eoa_matic_balance,
-            get_exchange_usdc_balance, get_usdt_balance, scan_redeemable_tokens,
+            get_usdt_balance, get_usdc_native_balance, scan_redeemable_tokens,
         )
 
         result = {
             "eoa_usdc": None,
             "eoa_usdt": None,
-            "exchange_usdc": None,
+            "eoa_usdc_native": None,
             "matic": None,
             "unredeemed_count": 0,
             "unredeemed_value": 0.0,
         }
 
         try:
-            eoa_usdc, eoa_usdt, exchange_usdc, matic = await asyncio.gather(
+            eoa_usdc, eoa_usdt, usdc_native, matic = await asyncio.gather(
                 asyncio.to_thread(get_eoa_usdc_balance),
                 asyncio.to_thread(get_usdt_balance),
-                asyncio.to_thread(get_exchange_usdc_balance),
+                asyncio.to_thread(get_usdc_native_balance),
                 asyncio.to_thread(get_eoa_matic_balance),
             )
             result["eoa_usdc"] = round(eoa_usdc, 4)
             result["eoa_usdt"] = round(eoa_usdt, 4)
-            result["exchange_usdc"] = round(exchange_usdc, 4)
+            result["eoa_usdc_native"] = round(usdc_native, 4)
             result["matic"] = round(matic, 4)
         except Exception as e:
             logger.warning("Failed to fetch on-chain balances: %s", e)
@@ -355,6 +506,88 @@ def create_router(engine, ws_manager) -> APIRouter:
             logger.warning("Failed to scan redeemable tokens: %s", e)
 
         return result
+
+    @router.post("/paper/fund")
+    async def paper_fund(request: Request):
+        """Set or add to the paper trading bankroll (dry_run only)."""
+        _require_admin(request)
+        from bot.config import get as cfg_get
+        if not cfg_get("dry_run", True):
+            raise HTTPException(400, "Cannot fund paper wallet in live mode")
+
+        body = await request.json()
+        amount = body.get("amount")
+        mode = body.get("mode", "set")  # "set" = absolute, "add" = increment
+
+        try:
+            amount_f = float(amount)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid amount")
+        if amount_f <= 0:
+            raise HTTPException(400, "Amount must be positive")
+
+        current = await state.get("bankroll", 0.0)
+        if mode == "add":
+            new_bankroll = round(current + amount_f, 2)
+        else:
+            new_bankroll = round(amount_f, 2)
+
+        await state.set("bankroll", new_bankroll)
+        await state.set("initial_deposit", new_bankroll)
+        _audit(request, "PAPER_FUND", f"mode={mode} amount=${amount_f:.2f} new_bankroll=${new_bankroll:.2f}")
+        logger.info("Paper wallet funded: $%.2f → $%.2f (mode=%s)", current, new_bankroll, mode)
+
+        return {
+            "status": "ok",
+            "previous_bankroll": current,
+            "new_bankroll": new_bankroll,
+            "mode": mode,
+        }
+
+    @router.post("/paper/reset")
+    async def paper_reset(request: Request):
+        """Reset paper trading: clear all dry_run trades, reset bankroll."""
+        _require_admin(request)
+        from bot.config import get as cfg_get
+        if not cfg_get("dry_run", True):
+            raise HTTPException(400, "Cannot reset paper wallet in live mode")
+
+        body = await request.json()
+        bankroll = body.get("bankroll", 50.0)
+        try:
+            bankroll_f = float(bankroll)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid bankroll amount")
+        if bankroll_f <= 0:
+            raise HTTPException(400, "Bankroll must be positive")
+
+        _audit(request, "PAPER_RESET", f"bankroll=${bankroll_f:.2f}")
+
+        # Clear dry_run trades from DB
+        db = await get_db()
+        try:
+            cursor = await db.execute("DELETE FROM trades WHERE dry_run = 1")
+            deleted = cursor.rowcount
+            await db.execute("DELETE FROM daily_stats")
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Reset state
+        await state.set("bankroll", bankroll_f)
+        await state.set("initial_deposit", bankroll_f)
+        await state.set("daily_pnl", 0.0)
+        await state.set("daily_fees", 0.0)
+        await state.set("has_open_position", False)
+        await state.set("current_exposure", 0.0)
+
+        logger.info("Paper trading reset: bankroll=$%.2f, deleted %d trades", bankroll_f, deleted)
+
+        return {
+            "status": "ok",
+            "bankroll": bankroll_f,
+            "trades_deleted": deleted,
+        }
 
     @router.post("/wallet/redeem-all")
     async def wallet_redeem_all(request: Request):
@@ -512,10 +745,12 @@ def create_router(engine, ws_manager) -> APIRouter:
 def _mode_filter(mode: str, prefix: str = "WHERE") -> str:
     """Build SQL clause to filter trades by dry_run mode."""
     if mode == "paper":
-        return f"{prefix} dry_run = 1"
+        clause = "dry_run = 1"
     elif mode == "live":
-        return f"{prefix} dry_run = 0"
-    return ""  # 'all' — no filter
+        clause = "dry_run = 0"
+    else:
+        return ""  # 'all' — no filter
+    return f"{prefix} {clause}" if prefix else clause
 
 
 def _update_env(data: dict):

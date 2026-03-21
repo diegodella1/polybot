@@ -16,6 +16,7 @@ _stale_reads: deque[float] = deque(maxlen=50)       # timestamps of stale data r
 _slippage_events: deque[tuple[float, float]] = deque(maxlen=100)  # (timestamp, slippage)
 _kill_switch_active = False
 _kill_switch_activated_at: float = 0.0
+_kill_switch_reason: str = ""
 
 
 class RiskCheck:
@@ -142,7 +143,7 @@ async def record_outcome(won: bool, pnl: float, bankroll: float):
             logger.warning("Entering cooldown: %d rounds after %d losses", cooldown, consec)
 
     daily_pnl = await state.get("daily_pnl", 0.0)
-    await state.set("daily_pnl", daily_pnl + pnl)
+    await state.set("daily_pnl", round(daily_pnl + pnl, 2))
     await state.set("bankroll", bankroll)
     # Clear position tracking
     await state.set("has_open_position", False)
@@ -186,20 +187,24 @@ def check_regime_edge(
     microspike: bool,
     delta_dir: str,
     side: str,
+    duration: float = 300,
 ) -> RiskCheck:
-    """Apply edge thresholds by temporal regime (tau = seconds remaining).
+    """Apply edge thresholds by temporal regime (tau normalized to % of duration).
 
     Each regime has a min edge requirement. Late regimes also have spread limits.
     Microspike in opposing direction → block.
     """
     regime = get("edge_regime", {})
 
-    # Determine regime and required edge
-    if tau > 60:
+    # Normalize tau as percentage of market duration
+    tau_pct = tau / duration if duration > 0 else 0
+
+    # Determine regime and required edge (by normalized time remaining)
+    if tau_pct > 0.40:
         req_edge = regime.get("tau_120_60", 0.18)
-    elif tau > 30:
+    elif tau_pct > 0.20:
         req_edge = regime.get("tau_60_30", 0.14)
-    elif tau > 10:
+    elif tau_pct > 0.07:
         req_edge = regime.get("tau_30_10", 0.12)
     else:
         req_edge = regime.get("tau_10_0", 0.15)
@@ -207,11 +212,11 @@ def check_regime_edge(
     if edge < req_edge:
         return RiskCheck(
             False,
-            f"Edge {edge:.1%} < regime req {req_edge:.1%} (tau={tau:.0f}s)",
+            f"Edge {edge:.1%} < regime req {req_edge:.1%} (tau={tau:.0f}s, {tau_pct:.0%} of {duration:.0f}s)",
         )
 
-    # Late-entry spread limit
-    if tau <= 30 and spread is not None:
+    # Late-entry spread limit (last 20% of market)
+    if tau_pct <= 0.20 and spread is not None:
         late_max = regime.get("late_max_spread", 0.03)
         if spread > late_max:
             return RiskCheck(
@@ -243,22 +248,40 @@ async def check_kill_switch() -> RiskCheck:
 
     now = time.time()
 
-    # Check if kill switch should resume
+    # Check if kill switch should resume (graduated by reason)
     if _kill_switch_active:
-        resume_min = get("kill_resume_stable_min", 10)
         elapsed_min = (now - _kill_switch_activated_at) / 60.0
-        if elapsed_min < resume_min:
-            return RiskCheck(False, f"Kill switch active ({elapsed_min:.1f}/{resume_min}min)")
 
-        # Check eq for resume
-        from bot.fair_value import conformal
-        resume_eq = get("kill_resume_eq_max", 0.10)
-        if conformal.eq > resume_eq:
-            return RiskCheck(False, f"Kill switch: eq={conformal.eq:.3f} > resume threshold {resume_eq}")
+        # Graduated recovery times by trigger reason
+        if "stale" in _kill_switch_reason:
+            resume_min = 0.5  # 30s — transient data issue
+        elif "slippage" in _kill_switch_reason:
+            resume_min = 2.0  # 2 min — market microstructure
+        elif "eq" in _kill_switch_reason:
+            # eq-based: only resume when eq drops below threshold (no time gate)
+            from bot.fair_value import conformal
+            resume_eq = get("kill_resume_eq_max", 0.10)
+            if conformal.eq > resume_eq:
+                return RiskCheck(False, f"Kill switch: eq={conformal.eq:.3f} > resume threshold {resume_eq}")
+            _kill_switch_active = False
+            logger.info("Kill switch deactivated: eq=%.3f below threshold", conformal.eq)
+            # fall through to trigger checks
+            resume_min = 0.0
+        else:
+            resume_min = get("kill_resume_stable_min", 10)  # consecutive losses: 10 min
 
-        # Stable enough — deactivate
-        _kill_switch_active = False
-        logger.info("Kill switch deactivated after %.1f min stability", elapsed_min)
+        if resume_min > 0 and elapsed_min < resume_min:
+            return RiskCheck(False, f"Kill switch active ({elapsed_min:.1f}/{resume_min}min) [{_kill_switch_reason}]")
+
+        if _kill_switch_active:
+            # Check eq for resume on non-eq triggers too
+            from bot.fair_value import conformal
+            resume_eq = get("kill_resume_eq_max", 0.10)
+            if conformal.eq > resume_eq:
+                return RiskCheck(False, f"Kill switch: eq={conformal.eq:.3f} > resume threshold {resume_eq}")
+
+            _kill_switch_active = False
+            logger.info("Kill switch deactivated after %.1f min stability [%s]", elapsed_min, _kill_switch_reason)
 
     # --- Check trigger conditions ---
 
@@ -300,9 +323,10 @@ async def check_kill_switch() -> RiskCheck:
 
 def _activate_kill(reason: str):
     """Activate kill switch with logging."""
-    global _kill_switch_active, _kill_switch_activated_at
+    global _kill_switch_active, _kill_switch_activated_at, _kill_switch_reason
     _kill_switch_active = True
     _kill_switch_activated_at = time.time()
+    _kill_switch_reason = reason
     logger.warning("KILL SWITCH ACTIVATED: %s", reason)
 
 
@@ -341,18 +365,31 @@ def check_endgame(
     return RiskCheck(False, f"Endgame block (tau={tau:.0f}s): {', '.join(reasons)}")
 
 
-def check_daily_dollar_limits(daily_pnl: float) -> RiskCheck:
-    """Check daily stop-loss and profit target in absolute USD."""
+async def check_daily_dollar_limits(daily_pnl: float) -> RiskCheck:
+    """Check daily stop-loss and session profit cap (x3 bankroll)."""
     stop_loss = get("daily_stop_loss_usd", 2.0)
-    profit_target = get("daily_profit_target_usd", 2.0)
 
     if daily_pnl <= -stop_loss:
         return RiskCheck(False, f"Daily stop loss: ${daily_pnl:.2f} <= -${stop_loss:.2f}")
 
-    if profit_target > 0 and daily_pnl >= profit_target:
-        return RiskCheck(False, f"Daily profit target: ${daily_pnl:.2f} >= ${profit_target:.2f}")
+    # Session cap: pause if daily PnL >= 3x bankroll (extraordinary session)
+    bankroll = await state.get("bankroll", 50.0)
+    session_cap = bankroll * 3
+    if daily_pnl >= session_cap:
+        return RiskCheck(False, f"Session x3 cap: ${daily_pnl:.2f} >= ${session_cap:.2f}")
 
     return RiskCheck(True)
+
+
+def dynamic_min_edge() -> float:
+    """Compute effective min_edge that tightens as conformal eq rises.
+
+    effective = base_min_edge + eq * 0.5
+    Examples: eq=0.03 → 0.135, eq=0.10 → 0.17 (with base 0.12).
+    """
+    from bot.fair_value import conformal
+    base = get("min_edge", 0.12)
+    return base + conformal.eq * 0.5
 
 
 def check_slippage_tightening() -> float:

@@ -17,6 +17,32 @@ _SELL = None
 logger = logging.getLogger(__name__)
 
 
+def walk_book(
+    levels: list[tuple[float, float]], shares_needed: float
+) -> tuple[float, float, bool]:
+    """Walk an orderbook side to simulate a realistic fill.
+
+    Args:
+        levels: [(price, size), ...] sorted best-first (asks ascending, bids descending).
+        shares_needed: number of shares to fill.
+
+    Returns:
+        (avg_fill_price, shares_filled, fully_filled)
+    """
+    filled = 0.0
+    cost = 0.0
+    for price, size in levels:
+        take = min(size, shares_needed - filled)
+        cost += take * price
+        filled += take
+        if filled >= shares_needed:
+            break
+    if filled <= 0:
+        return (0.0, 0.0, False)
+    avg_price = cost / filled
+    return (avg_price, filled, filled >= shares_needed)
+
+
 def has_polymarket_creds() -> bool:
     """Check if Polymarket API credentials are configured."""
     return bool(
@@ -124,6 +150,8 @@ async def execute_trade(
     best_price: float | None = None,
     tau_at_entry: float | None = None,
     phat_at_entry: float | None = None,
+    market_duration: int = 300,
+    orderbook=None,
 ) -> TradeResult:
     """Execute a trade on Polymarket.
 
@@ -142,18 +170,61 @@ async def execute_trade(
     timestamp = datetime.now(timezone.utc).isoformat()
 
     if dry_run:
-        logger.info(
-            "[DRY RUN] %s | signal=%.3f | $%.2f @ %.4f | %s",
-            side.upper(),
-            signal_score,
-            size_usd,
-            entry_price,
-            condition_id[:16],
-        )
         order_id = f"dry_{int(datetime.now(timezone.utc).timestamp())}"
+        tick = 0.01
+        MIN_SHARES = 5
+        min_trade = get("min_trade_usd", 1.0)
+
+        # Walk-the-book: realistic fill simulation using live orderbook
+        ob_asks = getattr(orderbook, "asks", None) if orderbook else None
+        if ob_asks:
+            # Compute integer shares first
+            best = best_price if best_price else entry_price
+            shares = max(MIN_SHARES, math.floor(size_usd / best))
+            avg_price, filled_shares, fully_filled = walk_book(ob_asks, shares)
+            if not fully_filled:
+                logger.warning(
+                    "[DRY RUN] Insufficient liquidity: needed %d shares, book has %.0f — IOC rejected",
+                    shares, filled_shares,
+                )
+                return TradeResult(
+                    success=False,
+                    error=f"Insufficient liquidity: needed {shares}, available {filled_shares:.0f}",
+                )
+            filled_price = round(round(avg_price / tick) * tick, 4)
+            filled_price = min(filled_price, 0.95)
+            size_usd = round(shares * filled_price, 2)
+            if size_usd < min_trade:
+                shares = max(MIN_SHARES, math.ceil(min_trade / filled_price))
+                size_usd = round(shares * filled_price, 2)
+            entry_price = filled_price
+            logger.info(
+                "[DRY RUN] WALK-BOOK %s | signal=%.3f | %d shares @ %.4f (avg) | $%.2f | %s",
+                side.upper(), signal_score, shares, filled_price, size_usd, condition_id[:16],
+            )
+        else:
+            # Fallback: no orderbook available (WS not connected)
+            logger.warning("[DRY RUN] No orderbook available, using fixed 1-tick slippage fallback")
+            best = best_price if best_price else entry_price
+            filled_price = min((best + tick), 0.95)
+            filled_price = round(round(filled_price / tick) * tick, 4)
+            shares = max(MIN_SHARES, math.floor(size_usd / filled_price))
+            size_usd = round(shares * filled_price, 2)
+            if size_usd < min_trade:
+                shares = max(MIN_SHARES, math.ceil(min_trade / filled_price))
+                size_usd = round(shares * filled_price, 2)
+            entry_price = filled_price
+            logger.info(
+                "[DRY RUN] %s | signal=%.3f | $%.2f @ %.4f | %s",
+                side.upper(), signal_score, size_usd, entry_price, condition_id[:16],
+            )
 
         # Calculate simulated slippage
         fill_slippage = abs(entry_price - best_price) if best_price else 0.0
+
+        # Track slippage in risk module (same as live — needed for kill switch & tightening)
+        from bot.risk import record_slippage
+        record_slippage(fill_slippage)
 
         # Record dry-run trade in DB
         db = await get_db()
@@ -163,17 +234,29 @@ async def execute_trade(
                    (timestamp, condition_id, token_id, side, signal_score,
                     entry_price, size_usd, shares, signal_details, btc_price,
                     dry_run, order_id, order_status,
-                    tau_at_entry, best_price_at_decision, fill_slippage, phat_at_entry)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tau_at_entry, best_price_at_decision, fill_slippage, phat_at_entry,
+                    market_duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     timestamp, condition_id, token_id, side, signal_score,
                     entry_price, size_usd, shares, json.dumps(signal_details),
                     btc_price, 1, order_id, "filled",
                     tau_at_entry, best_price, fill_slippage, phat_at_entry,
+                    market_duration,
                 ),
             )
             await db.commit()
             trade_id = cursor.lastrowid
+
+            # Record slippage event (same as live)
+            tick = 0.01
+            await db.execute(
+                """INSERT INTO slippage_events
+                   (trade_id, best_at_decision, fill_price, slippage, tick_size)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (trade_id, best_price or entry_price, entry_price, fill_slippage, tick),
+            )
+            await db.commit()
         finally:
             await db.close()
 
@@ -227,13 +310,15 @@ async def execute_trade(
                    (timestamp, condition_id, token_id, side, signal_score,
                     entry_price, size_usd, shares, signal_details, btc_price,
                     dry_run, order_status,
-                    tau_at_entry, best_price_at_decision, phat_at_entry)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tau_at_entry, best_price_at_decision, phat_at_entry,
+                    market_duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     timestamp, condition_id, token_id, side, signal_score,
                     entry_price, size_usd, shares, json.dumps(signal_details),
                     btc_price, 0, "pending_fill",
                     tau_at_entry, best_price, phat_at_entry,
+                    market_duration,
                 ),
             )
             await db.commit()
@@ -461,18 +546,37 @@ async def recover_pending_fills():
 
 
 async def exit_position(
-    token_id: str, shares: float, bid: float
+    token_id: str, shares: float, bid: float, orderbook=None,
 ) -> dict:
-    """Sell position for stop-loss. Returns {"success": bool, "exit_price": float, "proceeds": float}."""
+    """Sell position for stop-loss/take-profit. Returns {"success": bool, "exit_price": float, "proceeds": float}."""
     dry_run = get("dry_run", True)
 
     if dry_run:
-        exit_price = max(0.01, bid - 0.01)
-        proceeds = round(shares * exit_price, 2)
-        logger.info(
-            "[DRY RUN] STOP-LOSS SELL | %d shares @ %.2f¢ | proceeds=$%.2f",
-            shares, exit_price * 100, proceeds,
-        )
+        tick = 0.01
+        ob_bids = getattr(orderbook, "bids", None) if orderbook else None
+        if ob_bids:
+            int_shares = max(1, math.floor(shares))
+            avg_price, filled_shares, fully_filled = walk_book(ob_bids, int_shares)
+            if not fully_filled:
+                logger.warning(
+                    "[DRY RUN] Exit insufficient liquidity: needed %d shares, book has %.0f — rejected",
+                    int_shares, filled_shares,
+                )
+                return {"success": False, "exit_price": 0, "proceeds": 0}
+            exit_price = max(0.01, round(round(avg_price / tick) * tick, 4))
+            proceeds = round(int_shares * exit_price, 2)
+            logger.info(
+                "[DRY RUN] WALK-BOOK EXIT | %d shares @ %.2f¢ (avg) | proceeds=$%.2f",
+                int_shares, exit_price * 100, proceeds,
+            )
+        else:
+            logger.warning("[DRY RUN] No orderbook for exit, using bid - 1 tick fallback")
+            exit_price = max(0.01, bid - 0.01)
+            proceeds = round(shares * exit_price, 2)
+            logger.info(
+                "[DRY RUN] EXIT SELL | %d shares @ %.2f¢ | proceeds=$%.2f",
+                shares, exit_price * 100, proceeds,
+            )
         return {"success": True, "exit_price": exit_price, "proceeds": proceeds}
 
     client = _get_client()
@@ -565,7 +669,7 @@ async def resolve_trade(trade_id: int, won: bool, bankroll: float,
             sell_fee = round(exit_proceeds * TAKER_FEE, 4)
             entry_fee = round(trade["size_usd"] * TAKER_FEE, 4)
             fee = entry_fee + sell_fee
-            pnl = (exit_proceeds - sell_fee) - (trade["size_usd"] + entry_fee)
+            pnl = round((exit_proceeds - sell_fee) - (trade["size_usd"] + entry_fee), 2)
             outcome = exit_type or "stop_loss"
         elif won:
             # Win: redeem shares for $1 each (no fee on redemption)
@@ -573,13 +677,13 @@ async def resolve_trade(trade_id: int, won: bool, bankroll: float,
             payout = trade["shares"]  # shares * $1.00
             entry_fee = round(trade["size_usd"] * TAKER_FEE, 4)
             fee = entry_fee
-            pnl = payout - trade["size_usd"] - entry_fee
+            pnl = round(payout - trade["size_usd"] - entry_fee, 2)
             outcome = "win"
         else:
             # Loss: lost entry cost + entry fee
             entry_fee = round(trade["size_usd"] * TAKER_FEE, 4)
             fee = entry_fee
-            pnl = -(trade["size_usd"] + entry_fee)
+            pnl = round(-(trade["size_usd"] + entry_fee), 2)
             outcome = "loss"
 
         # Track cumulative fees
@@ -587,7 +691,7 @@ async def resolve_trade(trade_id: int, won: bool, bankroll: float,
         daily_fees = await state.get("daily_fees", 0.0)
         await state.set("daily_fees", round(daily_fees + fee, 4))
 
-        new_bankroll = bankroll + pnl
+        new_bankroll = round(bankroll + pnl, 2)
 
         await db.execute(
             """UPDATE trades

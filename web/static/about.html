@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>About Polybot</title>
-    <link rel="stylesheet" href="/static/style.css?v=12">
+    <link rel="stylesheet" href="/static/style.css?v=23">
 </head>
 <body>
     <header>
@@ -15,7 +15,7 @@
             <a href="/" class="header-link">Dashboard</a>
         </div>
     </header>
-    <div style="padding:4px 0;background:rgba(255,200,0,0.08);border-bottom:1px solid rgba(255,200,0,0.15);text-align:center;font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:0.3px">
+    <div style="padding:4px 0;background:var(--surface-2);border-bottom:1px solid var(--border);text-align:center;font-family:var(--font-sans);font-size:10px;color:var(--text-dim);letter-spacing:0.3px">
         EXPERIMENTAL &mdash; Not Financial Advice &middot; DYOR &middot; Use at your own risk
     </div>
 
@@ -28,9 +28,9 @@
 
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
             Polybot is an experimental automated trading bot for
-            <a href="https://polymarket.com" target="_blank" style="color:var(--accent);text-decoration:none">Polymarket</a>'s
-            BTC Up/Down 5-minute binary markets. It was built as a learning project to explore algorithmic trading,
-            signal processing, and market microstructure in a live environment with real money.
+            <a href="https://polymarket.com" target="_blank" style="color:var(--blue);text-decoration:none">Polymarket</a>'s
+            BTC Up/Down binary markets (5-minute and 15-minute). It was built as a learning project to explore
+            algorithmic trading, statistical modeling, and market microstructure in a live environment with real money.
         </p>
 
         <!-- How it works -->
@@ -41,35 +41,35 @@
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
-                <div style="font-size:11px;color:var(--accent);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">1. DISCOVER</div>
-                <div style="font-size:12px;color:var(--text-dim)">Finds the current 5-min BTC market on Polymarket and subscribes to its orderbook</div>
+                <div style="font-size:11px;color:var(--text-secondary);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">1. DISCOVER</div>
+                <div style="font-size:12px;color:var(--text-dim)">Finds the current 5m or 15m BTC market on Polymarket and subscribes to its orderbook</div>
             </div>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
                 <div style="font-size:11px;color:var(--green);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">2. FAIR VALUE</div>
-                <div style="font-size:12px;color:var(--text-dim)">Estimates P(up) from realized volatility and drift, finds edge vs market price</div>
+                <div style="font-size:12px;color:var(--text-dim)">Estimates P(up) from realized volatility and drift, finds edge vs market price after fees</div>
             </div>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
                 <div style="font-size:11px;color:var(--yellow);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">3. RISK CHECK</div>
-                <div style="font-size:12px;color:var(--text-dim)">Passes through 8 risk gates: loss streaks, exposure limits, circuit breakers</div>
+                <div style="font-size:12px;color:var(--text-dim)">Passes through 10 sequential risk gates including a kill switch and slippage monitoring</div>
             </div>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
                 <div style="font-size:11px;color:var(--blue, #60a5fa);font-weight:700;letter-spacing:0.5px;margin-bottom:6px">4. EXECUTE</div>
-                <div style="font-size:12px;color:var(--text-dim)">Places a limit order on-chain (Polygon), sizes proportionally to edge</div>
+                <div style="font-size:12px;color:var(--text-dim)">Places an IOC order on-chain (Polygon), with fixed sizing ($1&ndash;$2 per trade)</div>
             </div>
         </div>
 
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
             At market expiration, winning positions automatically redeem $1.00 per share back to USDC.e,
             creating a self-funding loop. The bot learns from every trade through a k-NN pattern store
-            that feeds historical outcomes back into future decisions.
+            and continuously calibrates its model using conformal prediction residuals.
         </p>
 
         <!-- Fair Value Model -->
         <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Fair Value Model</h3>
 
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
-            Instead of predicting direction, the bot estimates the <em>real probability</em> of BTC going up in the next 5 minutes
-            using realized volatility, then buys only when the market underprices that probability (after fees).
+            Instead of predicting direction, the bot estimates the <em>real probability</em> of BTC going up
+            using realized volatility, then buys only when the market underprices that probability (after the 10% fee).
         </p>
 
         <table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:24px">
@@ -82,26 +82,30 @@
             <tbody>
                 <tr style="border-bottom:1px solid var(--border)">
                     <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">&sigma; (vol)</td>
-                    <td style="padding:10px 12px;color:var(--text-dim)">std of 5-candle returns over ~1 hour of data</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">std of 5-candle returns over ~1 hour, scaled by &radic;(T/5) for longer markets</td>
                 </tr>
                 <tr style="border-bottom:1px solid var(--border)">
                     <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">&mu; (drift)</td>
-                    <td style="padding:10px 12px;color:var(--text-dim)">EMA of recent returns + live 1-min momentum (30% blend)</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">EMA of recent returns (&alpha;=0.1) + live 1-min momentum (15% blend)</td>
                 </tr>
                 <tr style="border-bottom:1px solid var(--border)">
                     <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">P(up)</td>
-                    <td style="padding:10px 12px;color:var(--text-dim)">&Phi;(&mu; / &sigma;) &mdash; normal CDF, capped at 75%</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">&Phi;(&mu; / &sigma;) &mdash; normal CDF, clamped to [5%, 75%]</td>
+                </tr>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Edge</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">P(side) - market_price &times; 1.10 &mdash; only trade when edge is 6&ndash;20%</td>
                 </tr>
                 <tr>
-                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Edge</td>
-                    <td style="padding:10px 12px;color:var(--text-dim)">P(side) - market_price &times; 1.10 &mdash; only trade when edge is 4-8%</td>
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Calibration</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">Conformal eq metric (p90 residuals) &mdash; triggers kill switch when model drifts</td>
                 </tr>
             </tbody>
         </table>
 
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:20px">
-            The model also filters by volatility regime: too low = no signal, too high = chaos.
-            Position sizing scales proportionally with edge magnitude.
+            The model also applies temporal regime thresholds &mdash; requiring higher edge as markets near expiration &mdash;
+            and filters out microspikes (sharp 1-min moves that distort signals).
         </p>
 
         <!-- Risk management -->
@@ -110,14 +114,28 @@
             Every potential trade passes through 10 sequential risk gates. If any gate fails, the trade is blocked:
         </p>
         <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
-            <li style="margin-bottom:6px">Bankroll floor &mdash; emergency stop below minimum balance</li>
+            <li style="margin-bottom:6px">Bankroll floor &mdash; emergency stop below $2</li>
             <li style="margin-bottom:6px">Consecutive loss cooldown &mdash; pauses after losing streaks</li>
             <li style="margin-bottom:6px">Circuit breaker &mdash; shuts down if win rate drops too low</li>
-            <li style="margin-bottom:6px">Max exposure &mdash; limits total open position value</li>
-            <li style="margin-bottom:6px">Position guard &mdash; only one position at a time</li>
-            <li style="margin-bottom:6px">Trade cooldown &mdash; minimum 2 minutes between trades (anti rapid-fire)</li>
-            <li style="margin-bottom:6px">Post-loss cooldown &mdash; 5-minute pause after every loss</li>
+            <li style="margin-bottom:6px">Max exposure &mdash; limits total open position value to $3.50</li>
+            <li style="margin-bottom:6px">Position guard &mdash; only one position per market</li>
+            <li style="margin-bottom:6px">Trade cooldown &mdash; minimum time between trades</li>
+            <li style="margin-bottom:6px">Daily stop-loss &mdash; hard stop at -$25/day</li>
+            <li style="margin-bottom:6px">Kill switch &mdash; multi-condition emergency halt (stale data, slippage, miscalibration, loss clusters)</li>
+            <li style="margin-bottom:6px">Slippage tightening &mdash; raises edge requirement when fill quality degrades</li>
             <li style="margin-bottom:6px">Drawdown scaling &mdash; automatically shrinks bet sizes on losing days</li>
+        </ul>
+
+        <!-- Auto-tuning -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Auto-tuning</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            Every ~12 minutes, an auto-tuning loop analyzes recent performance and adjusts parameters within safe guardrails:
+        </p>
+        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
+            <li style="margin-bottom:6px">Calibration tuning &mdash; tightens or relaxes edge requirements based on model accuracy</li>
+            <li style="margin-bottom:6px">Regime edge tuning &mdash; adjusts per-timeframe thresholds targeting ~50% win rate</li>
+            <li style="margin-bottom:6px">Active hours &mdash; excludes consistently unprofitable hours, rehabilitates recovering ones</li>
+            <li style="margin-bottom:6px">Spread threshold &mdash; reduces max spread when wide-spread trades underperform</li>
         </ul>
 
         <!-- Decision algorithm -->
@@ -127,26 +145,111 @@
         </p>
 
         <div style="font-family:var(--font-mono, monospace);font-size:12px;color:var(--text-dim);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:24px;line-height:1.8;overflow-x:auto">
-            <div><span style="color:var(--accent)">1.</span> Discover current 5-min BTC market on Polymarket</div>
+            <div><span style="color:var(--accent)">1.</span> Discover current 5m/15m BTC market on Polymarket</div>
             <div><span style="color:var(--accent)">2.</span> Estimate fair value: P(up) = &Phi;(&mu; / &sigma;) from realized vol</div>
-            <div><span style="color:var(--accent)">3.</span> Vol filter: skip if &sigma; &lt; 0.05% or &sigma; &gt; 0.4%</div>
+            <div><span style="color:var(--accent)">3.</span> Vol filter: skip if &sigma; &lt; 0.1% or &sigma; &gt; 0.4%</div>
             <div><span style="color:var(--accent)">4.</span> Edge = P(side) - market_price &times; 1.10</div>
-            <div><span style="color:var(--accent)">5.</span> Edge band: only trade if edge &isin; [4%, 8%]</div>
-            <div><span style="color:var(--accent)">6.</span> Risk gates: bankroll floor, loss streaks, cooldowns, exposure</div>
-            <div><span style="color:var(--accent)">7.</span> Entry price must be in [0.35, 0.65] &mdash; near-50/50 markets</div>
-            <div><span style="color:var(--accent)">8.</span> Spread check: reject if bid-ask spread &gt; 5&cent;</div>
-            <div><span style="color:var(--accent)">9.</span> Edge-proportional sizing: bigger edge &rarr; bigger bet</div>
-            <div><span style="color:var(--accent)">10.</span> Execute limit order on-chain (Polygon)</div>
-            <div><span style="color:var(--accent)">11.</span> Hold to expiration &rarr; winner redeems $1.00/share</div>
+            <div><span style="color:var(--accent)">5.</span> Edge band: only trade if edge &isin; [6%, 20%]</div>
+            <div><span style="color:var(--accent)">6.</span> Temporal regime: require higher edge near expiration</div>
+            <div><span style="color:var(--accent)">7.</span> Microspike filter: block trades against sharp 1-min moves</div>
+            <div><span style="color:var(--accent)">8.</span> Conformal bound: conservative P(side) must exceed breakeven</div>
+            <div><span style="color:var(--accent)">9.</span> Risk gates: bankroll, kill switch, loss streaks, cooldowns, exposure</div>
+            <div><span style="color:var(--accent)">10.</span> Entry price must be in [0.35, 0.65] &mdash; near-50/50 markets</div>
+            <div><span style="color:var(--accent)">11.</span> Spread check: reject if bid-ask spread &gt; 5&cent;</div>
+            <div><span style="color:var(--accent)">12.</span> Fixed sizing: $1&ndash;$2 per trade (adjusted for daily drawdown)</div>
+            <div><span style="color:var(--accent)">13.</span> Walk-the-book: compute fill price from live orderbook depth</div>
+            <div><span style="color:var(--accent)">14.</span> Execute IOC order on-chain (Polygon)</div>
+            <div><span style="color:var(--accent)">15.</span> Monitor: stop-loss at -8% (walk-the-book exit) or hold to expiration</div>
+            <div><span style="color:var(--accent)">16.</span> Winner redeems $1.00/share &mdash; no exit fee on redemption</div>
         </div>
+
+        <!-- Execution model -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Execution model</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            Orders are placed as IOC (Immediate-Or-Cancel) taker orders on the Polymarket CLOB.
+            The bot uses a <strong style="color:var(--text-primary)">walk-the-book</strong> algorithm
+            to simulate realistic fills by walking through orderbook levels:
+        </p>
+        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
+            <li style="margin-bottom:6px"><strong style="color:var(--text-primary)">Entry</strong> &mdash; walks the ask side level by level, computing a volume-weighted average fill price. If the book can't fill the full order, the trade is rejected (simulating IOC behavior)</li>
+            <li style="margin-bottom:6px"><strong style="color:var(--text-primary)">Exit (stop-loss)</strong> &mdash; walks the bid side. If insufficient liquidity to exit, the position is held to resolution instead</li>
+            <li style="margin-bottom:6px"><strong style="color:var(--text-primary)">No take-profit by selling</strong> &mdash; exits before resolution incur a second 10% taker fee, making early profit-taking almost always worse than holding to redemption</li>
+        </ul>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            This means the primary winning strategy is: <em>buy at a discount, hold to expiration, redeem at $1.00 per share (no exit fee)</em>.
+            Stop-losses still make sense because recovering partial value (even with double fees) beats losing 100%.
+        </p>
+
+        <!-- Fee structure -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Fee structure</h3>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:24px">
+            <thead>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <th style="text-align:left;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">SCENARIO</th>
+                    <th style="text-align:left;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">ENTRY FEE</th>
+                    <th style="text-align:left;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">EXIT FEE</th>
+                    <th style="text-align:left;padding:8px 12px;color:var(--text-dim);font-weight:600;font-size:11px;letter-spacing:0.3px">TOTAL</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Win (hold to resolution)</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">10%</td>
+                    <td style="padding:10px 12px;color:var(--green)">0% (redeem)</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">10%</td>
+                </tr>
+                <tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Loss (hold to resolution)</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">10%</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">&mdash;</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">10%</td>
+                </tr>
+                <tr>
+                    <td style="padding:10px 12px;color:var(--text-primary);font-weight:600">Stop-loss (sell early)</td>
+                    <td style="padding:10px 12px;color:var(--text-dim)">10%</td>
+                    <td style="padding:10px 12px;color:var(--red, #ef4444)">10%</td>
+                    <td style="padding:10px 12px;color:var(--red, #ef4444)">20%</td>
+                </tr>
+            </tbody>
+        </table>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            The 10% taker fee is the dominant cost. At entry price $0.50, you need P(win) &gt; 55% just to break even.
+            This is why the model requires a positive edge <em>after</em> fees before entering any trade.
+        </p>
+
+        <!-- Asymmetric edge -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Directional asymmetry</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            Empirical observation showed that DOWN signals are noisier and less reliable than UP signals.
+            To compensate, the bot applies a <strong style="color:var(--text-primary)">+3% edge penalty</strong>
+            on DOWN trades &mdash; requiring stronger conviction before betting on a price decline.
+            This reduces the frequency of low-quality DOWN entries that historically underperformed.
+        </p>
+
+        <!-- Paper trading -->
+        <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Paper trading mode</h3>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            The bot supports a realistic paper trading mode (dry_run) that uses the same walk-the-book
+            execution engine as live trading. Unlike typical simulators with fixed slippage:
+        </p>
+        <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
+            <li style="margin-bottom:6px">Fill prices are computed from the real-time orderbook (volume-weighted average)</li>
+            <li style="margin-bottom:6px">Orders are rejected if the book lacks sufficient liquidity</li>
+            <li style="margin-bottom:6px">Slippage, fees, and risk tracking behave identically to live mode</li>
+            <li style="margin-bottom:6px">Paper bankroll can be funded and reset independently from the admin panel</li>
+        </ul>
+        <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
+            The goal is that paper trading results are predictive of live performance, so strategy
+            changes can be validated before committing real capital.
+        </p>
 
         <!-- The market -->
         <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">The market</h3>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
-            Polymarket's BTC 5-minute binary markets are simple:
+            Polymarket's BTC binary markets are simple:
         </p>
         <ul style="color:var(--text-dim);font-size:13px;margin-bottom:20px;padding-left:20px">
-            <li style="margin-bottom:6px">A new market opens every 5 minutes: "Will BTC go Up or Down?"</li>
+            <li style="margin-bottom:6px">New markets open every 5 and 15 minutes: "Will BTC go Up or Down?"</li>
             <li style="margin-bottom:6px">Buy UP or DOWN tokens between 0&cent; and 100&cent;</li>
             <li style="margin-bottom:6px">Winner pays <strong style="color:var(--text-primary)">$1.00/share</strong>, loser pays $0.00</li>
             <li style="margin-bottom:6px"><strong style="color:var(--text-primary)">10% taker fee</strong> on entry &mdash; no fee on redemption</li>
@@ -157,13 +260,13 @@
         <h3 style="font-size:15px;font-weight:600;margin:32px 0 12px;color:var(--text-primary)">Why it exists</h3>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
             This is not about making money. The bankroll is intentionally small and the primary
-            goal is learning: how signals interact, how markets behave at the microstructure level, how to build
-            robust automated systems, and how to iterate on strategy through data.
+            goal is learning: how statistical models interact with live markets, how to build
+            robust automated systems with adaptive risk management, and how to iterate on strategy through data.
         </p>
         <p style="color:var(--text-dim);font-size:14px;margin-bottom:16px">
-            The bot is constantly evolving &mdash; signals get tuned, risk rules get adjusted, new components
-            get added. Every trade generates data that feeds back into the system. It's a live
-            experiment in the truest sense.
+            The bot is constantly evolving &mdash; the auto-tuning loop adjusts parameters in real time,
+            the conformal calibration tracks model accuracy, and every trade generates data that feeds
+            back into the system. It's a live experiment in the truest sense.
         </p>
 
         <!-- Tech stack -->
@@ -202,8 +305,8 @@
         </p>
 
         <!-- Disclaimer -->
-        <div style="margin:40px 0 24px;padding:16px 20px;border:1px solid rgba(255,200,0,0.15);border-radius:8px;background:rgba(255,200,0,0.04);font-size:12px;color:var(--text-dim);line-height:1.6">
-            <strong style="color:var(--yellow)">Disclaimer</strong><br>
+        <div style="margin:40px 0 24px;padding:16px 20px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);font-size:12px;color:var(--text-dim);line-height:1.6">
+            <strong style="color:var(--text-secondary)">Disclaimer</strong><br>
             This is experimental software built for educational purposes. It is not financial advice (NFA).
             Do your own research (DYOR). Trading prediction markets involves substantial risk of loss.
             Past performance does not guarantee future results. The author assumes no responsibility
